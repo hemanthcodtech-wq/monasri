@@ -1,0 +1,1185 @@
+import { Router, Request, Response } from 'express';
+import db from '../db/connection.js';
+import { hashPassword } from '../db/authUtils.js';
+import { syncDailyRosterStatus } from '../services/attendanceLifecycle.js';
+import { getSocketService } from '../services/socketService.js';
+import { computeVerifiedSalesMaps, extractDateIST, getPaymentDateIST, getCurrentMonthPrefixIST } from '../utils/revenueUtils.js';
+import { getTodayDateIST } from '../utils/dateUtils.js';
+
+const router = Router();
+
+function ensureAllStaffInTeamMembers() {
+  try {
+    const admin = db.prepare("SELECT id FROM team_members WHERE id = 'emp-ad-1' OR empCode = 'TNX-AD01'").get();
+    if (!admin) {
+      db.prepare(`
+        INSERT INTO team_members (
+          id, empCode, name, avatar, role, groupName, phone, emergencyPhone, dob, 
+          employeeType, attendanceStatus, dialsToday, goalCalls, connected, interested, 
+          salesAchieved, salesTarget, conversionRate, portal, email, password, active, 
+          salary, joiningDate, address, bloodGroup
+        ) VALUES (
+          'emp-ad-1', 'TNX-AD01', 'Super Admin', 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+          'Executive Director', 'Executive Management', '+91 98765 43210', '+91 98765 43210',
+          '1985-04-12', 'Full - Time', 'PRESENT', 0, 0, 0, 0, 0, 0, 0,
+          'admin', 'sagarsuchi26@gmail.com', 'admin123', 1, 150000, '2023-01-01',
+          'Trade Nexus Corporate HQ, Financial District', 'O+ ve'
+        )
+      `).run();
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+// GET /api/team-members
+router.get('/', (req: Request, res: Response) => {
+  try {
+    ensureAllStaffInTeamMembers();
+    syncDailyRosterStatus();
+    const user = req.user;
+    const includeDocuments = req.query.includeDocuments === 'true';
+    const requestedMonth = typeof req.query.month === 'string' && /^\d{4}-\d{2}$/.test(req.query.month)
+      ? req.query.month
+      : undefined;
+    const salesMaps = computeVerifiedSalesMaps(db, requestedMonth);
+    const todayStr = getTodayDateIST();
+
+    // Live daily metrics: Aggregate today's call logs from call_logs per telecaller
+    const todayCallStats = new Map<string, { dials: number; connected: number; interested: number }>();
+    try {
+      const callRows = db.prepare(`
+        SELECT 
+          employeeId,
+          LOWER(COALESCE(employeeName, '')) as empName,
+          COUNT(*) as dialsCount,
+          SUM(CASE WHEN outcome = 'CONNECTED' OR outcome = 'DEAL_CLOSED' OR durationSec > 0 THEN 1 ELSE 0 END) as connectedCount,
+          SUM(CASE WHEN outcome = 'INTERESTED' THEN 1 ELSE 0 END) as interestedCount
+        FROM call_logs
+        WHERE (date = ? OR datetime(createdAt, '+5 hours', '30 minutes') LIKE ?)
+        GROUP BY employeeId, empName
+      `).all(todayStr, `${todayStr}%`) as any[];
+
+      for (const row of callRows) {
+        const statsObj = {
+          dials: Number(row.dialsCount || 0),
+          connected: Number(row.connectedCount || 0),
+          interested: Number(row.interestedCount || 0),
+        };
+        if (row.employeeId) todayCallStats.set(row.employeeId, statsObj);
+        if (row.empName) todayCallStats.set(row.empName, statsObj);
+      }
+    } catch (_) {}
+
+    // Live daily metrics: Aggregate unique leads completed today from assigned_leads
+    const todayLeadStats = new Map<string, { completed: number; interested: number }>();
+    try {
+      const leadRows = db.prepare(`
+        SELECT 
+          assignedToEmployeeId,
+          LOWER(COALESCE(assignedToEmployeeName, '')) as empName,
+          COUNT(*) as completedCount,
+          SUM(CASE WHEN status = 'INTERESTED' THEN 1 ELSE 0 END) as interestedCount
+        FROM assigned_leads
+        WHERE status != 'PENDING' AND (
+          assignedDate = ? OR 
+          datetime(updatedAt, '+5 hours', '30 minutes') LIKE ? OR 
+          datetime(createdAt, '+5 hours', '30 minutes') LIKE ? OR 
+          lastCallTimestamp LIKE ?
+        )
+        GROUP BY assignedToEmployeeId, empName
+      `).all(todayStr, `${todayStr}%`, `${todayStr}%`, todayStr) as any[];
+
+      for (const row of leadRows) {
+        const lObj = {
+          completed: Number(row.completedCount || 0),
+          interested: Number(row.interestedCount || 0),
+        };
+        if (row.assignedToEmployeeId) todayLeadStats.set(row.assignedToEmployeeId, lObj);
+        if (row.empName) todayLeadStats.set(row.empName, lObj);
+      }
+    } catch (_) {}
+
+    const formatMember = (m: any) => {
+      const hasPanDoc = Boolean(m.panDocumentUrl && m.panDocumentUrl.length > 0);
+      const hasAadhaarDoc = Boolean(m.aadhaarDocumentUrl && m.aadhaarDocumentUrl.length > 0);
+      const callerKey = (m.name || '').trim().toLowerCase();
+      const monthlySalesAchieved = salesMaps.monthlyByCaller.get(callerKey) ?? 0;
+      const allTimeSalesAchieved = salesMaps.allTimeByCaller.get(callerKey) ?? 0;
+
+      const idKey = m.id;
+      const codeKey = m.empCode;
+      const nameKey = (m.name || '').trim().toLowerCase();
+
+      const callStat = (idKey && todayCallStats.get(idKey)) || (codeKey && todayCallStats.get(codeKey)) || (nameKey && todayCallStats.get(nameKey));
+      const leadStat = (idKey && todayLeadStats.get(idKey)) || (codeKey && todayLeadStats.get(codeKey)) || (nameKey && todayLeadStats.get(nameKey));
+
+      const liveCalls = callStat?.dials ?? 0;
+      const completedLeads = leadStat?.completed ?? 0;
+      // Live dials today: actual calls made today, falling back to unique leads completed today
+      const liveDialsToday = liveCalls > 0 ? liveCalls : completedLeads;
+      const liveConnected = callStat?.connected ?? 0;
+      const liveInterested = (callStat?.interested || 0) + (leadStat?.interested || 0);
+
+      let out: any;
+      if (includeDocuments) {
+        out = {
+          ...m,
+          dialsToday: liveDialsToday,
+          completedLeadsToday: completedLeads,
+          connected: liveConnected > 0 ? liveConnected : (m.connected || 0),
+          interested: liveInterested > 0 ? liveInterested : (m.interested || 0),
+          salesAchieved: monthlySalesAchieved,
+          allTimeSalesAchieved,
+          hasPanDoc,
+          hasAadhaarDoc,
+        };
+      } else {
+        const { panDocumentUrl, aadhaarDocumentUrl, ...rest } = m;
+        out = {
+          ...rest,
+          dialsToday: liveDialsToday,
+          completedLeadsToday: completedLeads,
+          connected: liveConnected > 0 ? liveConnected : (m.connected || 0),
+          interested: liveInterested > 0 ? liveInterested : (m.interested || 0),
+          salesAchieved: monthlySalesAchieved,
+          allTimeSalesAchieved,
+          hasPanDoc,
+          hasAadhaarDoc,
+        };
+      }
+
+      const finalCompanyAddress = (m.companyAddress && m.companyAddress !== 'HSR Layout' && !m.companyAddress.includes('Business Avenue') && !m.companyAddress.includes('Your City'))
+        ? m.companyAddress
+        : 'RR westbrook,6th main HSR layout , beside pizza artistry, Bengaluru 102';
+      const finalCompanyPhone = (m.companyPhone && !m.companyPhone.includes('8333909139') && !m.companyPhone.includes('98765'))
+        ? m.companyPhone
+        : '+919483001083';
+      const finalCompanyEmail = (m.companyEmail && !m.companyEmail.toLowerCase().includes('tradenexus.com'))
+        ? m.companyEmail
+        : 'hr@tradenexustradesmart.in';
+      const finalCompanyWebsite = (m.companyWebsite && !m.companyWebsite.includes('tradenexustradesmart.com') && !m.companyWebsite.includes('tradenexus.com'))
+        ? m.companyWebsite
+        : 'tradenexustradesmart.co.in';
+      out.companyAddress = finalCompanyAddress;
+      out.companyPhone = finalCompanyPhone;
+      out.companyEmail = finalCompanyEmail;
+      out.companyWebsite = finalCompanyWebsite;
+      out.signatoryName = m.signatoryName || 'T. Vidhya Sagar';
+      out.signatoryRole = m.signatoryRole || 'Chief Executive Officer';
+
+      // Security Lockdown: Never expose login credentials/passwords to non-admin accounts (e.g. HR, TL, Telecallers)
+      if (user && user.role !== 'admin') {
+        delete out.password;
+      }
+      return out;
+    };
+
+    // Team Leader: Scoped strictly to employees belonging to their assigned squad/team
+    if (user && user.role === 'team_leader') {
+      const leaderId = user.employeeId || user.id;
+      const leaderEmpCode = user.empCode || '';
+      const leaderName = user.name || '';
+
+      const leaderRow = db.prepare(`
+        SELECT groupName FROM team_members 
+        WHERE id = ? OR empCode = ? OR LOWER(name) = LOWER(?)
+        LIMIT 1
+      `).get(leaderId, leaderEmpCode, leaderName) as any;
+
+      const groupRow = db.prepare(`
+        SELECT name FROM team_groups 
+        WHERE LOWER(leaderName) = LOWER(?)
+        LIMIT 1
+      `).get(leaderName) as any;
+
+      const squadName = leaderRow?.groupName || groupRow?.name;
+
+      if (squadName) {
+        const members = db.prepare(`
+          SELECT id, empCode, name, avatar, role, groupName as "group", phone, emergencyPhone, dob, employeeType, attendanceStatus, checkInTime, checkInMethod, dialsToday, goalCalls, connected, interested, salesAchieved, salesTarget, conversionRate, portal, email, password, active, deactivatedOn, bankName, bankAccountNumber, bankIfscCode, panDocumentName, panDocumentUrl, aadhaarDocumentName, aadhaarDocumentUrl, salary, joiningDate, address, bloodGroup 
+          FROM team_members 
+          WHERE LOWER(groupName) = LOWER(?) OR id = ? OR empCode = ? OR LOWER(name) = LOWER(?)
+        `).all(squadName, leaderId, leaderEmpCode, leaderName);
+        return res.status(200).json(members.map(formatMember));
+      } else {
+        const members = db.prepare(`
+          SELECT id, empCode, name, avatar, role, groupName as "group", phone, emergencyPhone, dob, employeeType, attendanceStatus, checkInTime, checkInMethod, dialsToday, goalCalls, connected, interested, salesAchieved, salesTarget, conversionRate, portal, email, password, active, deactivatedOn, bankName, bankAccountNumber, bankIfscCode, panDocumentName, panDocumentUrl, aadhaarDocumentName, aadhaarDocumentUrl, salary, joiningDate, address, bloodGroup 
+          FROM team_members 
+          WHERE id = ? OR empCode = ? OR LOWER(name) = LOWER(?)
+        `).all(leaderId, leaderEmpCode, leaderName);
+        return res.status(200).json(members.map(formatMember));
+      }
+    }
+
+    const members = db.prepare('SELECT id, empCode, name, avatar, role, groupName as "group", phone, emergencyPhone, dob, employeeType, attendanceStatus, checkInTime, checkInMethod, dialsToday, goalCalls, connected, interested, salesAchieved, salesTarget, conversionRate, portal, email, password, active, deactivatedOn, bankName, bankAccountNumber, bankIfscCode, panDocumentName, panDocumentUrl, aadhaarDocumentName, aadhaarDocumentUrl, salary, joiningDate, address, bloodGroup, companyAddress, companyPhone, companyEmail, companyWebsite, signatoryName, signatoryRole FROM team_members').all();
+    return res.status(200).json(members.map(formatMember));
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// GET /api/team-members/:id/document/:type — On-demand KYC PDF fetch (pan or aadhaar)
+router.get('/:id/document/:type', (req: Request, res: Response) => {
+  try {
+    const { id, type } = req.params;
+    if (type !== 'pan' && type !== 'aadhaar') {
+      return res.status(400).json({ error: 'Invalid document type. Must be pan or aadhaar' });
+    }
+    const columnUrl = type === 'pan' ? 'panDocumentUrl' : 'aadhaarDocumentUrl';
+    const columnName = type === 'pan' ? 'panDocumentName' : 'aadhaarDocumentName';
+    const row = db.prepare(`SELECT id, name, ${columnName} as docName, ${columnUrl} as docUrl FROM team_members WHERE id = ? OR empCode = ?`).get(id, id) as any;
+    if (!row || !row.docUrl) {
+      return res.status(404).json({ error: `${type.toUpperCase()} document not found for this employee` });
+    }
+    return res.status(200).json({
+      id: row.id,
+      name: row.name,
+      type,
+      docName: row.docName || `${type.toUpperCase()}_Document.pdf`,
+      docUrl: row.docUrl,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// GET /api/team-members/floor-pulse
+router.get('/floor-pulse', (req: Request, res: Response) => {
+  try {
+    const user = req.user;
+    let squadFilter = '';
+    let squadParam: string | null = null;
+
+    if (user && user.role === 'team_leader') {
+      const leaderRow = db.prepare(`
+        SELECT groupName FROM team_members 
+        WHERE id = ? OR empCode = ? OR LOWER(name) = LOWER(?)
+        LIMIT 1
+      `).get(user.employeeId || user.id, user.empCode || '', user.name || '') as any;
+      const groupRow = db.prepare('SELECT name FROM team_groups WHERE LOWER(leaderName) = LOWER(?) LIMIT 1').get(user.name || '') as any;
+      squadParam = leaderRow?.groupName || groupRow?.name || null;
+      if (squadParam) {
+        squadFilter = 'AND LOWER(groupName) = LOWER(?)';
+      }
+    }
+
+    // 1. Live Floor Attendance: Active telecallers with dynamic punctuality and metrics
+    const salesMaps = computeVerifiedSalesMaps(db);
+    const rawActiveMembers = squadParam
+      ? db.prepare(`
+          SELECT id, empCode, name, avatar, role, groupName as "group", phone, 
+                 attendanceStatus, checkInTime, dialsToday, goalCalls, connected, 
+                 interested, salesAchieved, salesTarget
+          FROM team_members 
+          WHERE active = 1 AND LOWER(groupName) = LOWER(?)
+        `).all(squadParam) as any[]
+      : db.prepare(`
+          SELECT id, empCode, name, avatar, role, groupName as "group", phone, 
+                 attendanceStatus, checkInTime, dialsToday, goalCalls, connected, 
+                 interested, salesAchieved, salesTarget
+          FROM team_members 
+          WHERE active = 1
+        `).all() as any[];
+
+    const activeMembers = rawActiveMembers
+      .map((m) => {
+        const callerKey = (m.name || '').trim().toLowerCase();
+        return {
+          ...m,
+          salesAchieved: salesMaps.monthlyByCaller.get(callerKey) ?? 0,
+          allTimeSalesAchieved: salesMaps.allTimeByCaller.get(callerKey) ?? 0,
+        };
+      })
+      .sort((a, b) => {
+        const rankA = a.attendanceStatus === 'PRESENT' ? 1 : a.attendanceStatus === 'LATE' ? 2 : 3;
+        const rankB = b.attendanceStatus === 'PRESENT' ? 1 : b.attendanceStatus === 'LATE' ? 2 : 3;
+        if (rankA !== rankB) return rankA - rankB;
+        if (b.salesAchieved !== a.salesAchieved) return b.salesAchieved - a.salesAchieved;
+        return (b.dialsToday || 0) - (a.dialsToday || 0);
+      })
+      .slice(0, 6);
+
+    // 2. Live Working Leads Pulse: Most recent active lead touchpoints
+    const recentLeads = squadParam
+      ? db.prepare(`
+          SELECT 
+            al.id, 
+            al.name as contactName, 
+            al.company, 
+            al.assignedToEmployeeName as repName, 
+            al.status, 
+            al.dealValue, 
+            al.notes, 
+            al.lastCallTimestamp,
+            al.updatedAt,
+            al.createdAt
+          FROM assigned_leads al
+          JOIN team_members tm ON (tm.id = al.assignedToEmployeeId OR LOWER(tm.name) = LOWER(al.assignedToEmployeeName))
+          WHERE LOWER(tm.groupName) = LOWER(?)
+          ORDER BY al.updatedAt DESC, al.createdAt DESC
+          LIMIT 8
+        `).all(squadParam) as any[]
+      : db.prepare(`
+          SELECT 
+            al.id, 
+            al.name as contactName, 
+            al.company, 
+            al.assignedToEmployeeName as repName, 
+            al.status, 
+            al.dealValue, 
+            al.notes, 
+            al.lastCallTimestamp,
+            al.updatedAt,
+            al.createdAt
+          FROM assigned_leads al
+          ORDER BY al.updatedAt DESC, al.createdAt DESC
+          LIMIT 8
+        `).all() as any[];
+
+    const pulseLeads = recentLeads.map((lead, idx) => {
+      let type = 'CONNECTED';
+      const statusUpper = (lead.status || '').toUpperCase();
+      if (statusUpper.includes('CONVERT') || statusUpper.includes('WON') || lead.dealValue >= 75000) {
+        type = 'WON_DEAL';
+      } else if (statusUpper.includes('INTEREST')) {
+        type = 'INTERESTED';
+      } else if (statusUpper.includes('CALLBACK') || statusUpper.includes('CALL_BACK')) {
+        type = 'CALLBACK';
+      }
+
+      const formattedAmount = lead.dealValue > 0
+        ? (lead.dealValue >= 100000 ? `₹${(lead.dealValue / 100000).toFixed(2).replace(/\\.00$/, '')} L` : `₹${Number(lead.dealValue).toLocaleString('en-IN')}`)
+        : '—';
+
+      const relativeTimes = ['12m ago', '26m ago', '42m ago', '1h ago', '2h ago', '3h ago'];
+
+      return {
+        id: lead.id,
+        rep: lead.repName || 'Employee',
+        client: lead.company || 'Enterprise Client',
+        contact: lead.contactName || 'Key Decision Maker',
+        type,
+        amount: formattedAmount,
+        time: lead.lastCallTimestamp || relativeTimes[idx % relativeTimes.length],
+        note: lead.notes || 'Spoke with client, follow-up scheduled.'
+      };
+    });
+
+    return res.status(200).json({
+      activeMembers,
+      pulseLeads,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// GET /api/team-members/:id/monthly-history
+// Returns month-by-month breakdown of Leads Received, Excel Batches, Called, Interested, Won Deals, Dials, and Verified Sales vs Target
+router.get('/:id/monthly-history', (req: Request, res: Response) => {
+  try {
+    const rawId = (req.params.id || '').trim();
+    const member = db.prepare(`
+      SELECT id, empCode, name, role, groupName as "group", salesTarget, goalCalls, joiningDate
+      FROM team_members
+      WHERE id = ? OR empCode = ? OR LOWER(name) = LOWER(?)
+      LIMIT 1
+    `).get(rawId, rawId, rawId) as any;
+
+    if (!member) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+
+    const empId = member.id;
+    const empCode = member.empCode || '';
+    const empName = (member.name || '').trim();
+    const empNameLower = empName.toLowerCase();
+    const salesTarget = Number(member.salesTarget) > 0 ? Number(member.salesTarget) : 200000;
+
+    // 1. Fetch all assigned leads for this employee
+    const leads = db.prepare(`
+      SELECT id, batchId, status, dealValue, callCount, assignedDate, updatedAt, createdAt
+      FROM assigned_leads
+      WHERE assignedToEmployeeId = ? OR assignedToEmployeeId = ? OR LOWER(assignedToEmployeeName) = LOWER(?)
+    `).all(empId, empCode, empName) as any[];
+
+    // 2. Fetch all lead_batches so we can map batchId -> batch metadata
+    const allBatches = db.prepare(`
+      SELECT *
+      FROM lead_batches
+    `).all() as any[];
+    const batchMap = new Map<string, any>();
+    for (const b of allBatches) {
+      batchMap.set(b.id, b);
+    }
+
+    // 3. Fetch call_logs for this employee
+    const callLogs = db.prepare(`
+      SELECT id, outcome, durationSec, date, timestamp, createdAt
+      FROM call_logs
+      WHERE employeeId = ? OR employeeId = ? OR LOWER(clientName) = LOWER(?)
+    `).all(empId, empCode, empName) as any[];
+
+    // 4. Fetch deduplicated verified payments for this employee
+    const salesMaps = computeVerifiedSalesMaps(db);
+    const empVerifiedPayments = salesMaps.uniqueRows.filter(
+      (p) => (p.telecallerName || '').trim().toLowerCase() === empNameLower
+    );
+
+    // 5. Build list of months (at least last 6 calendar months in IST + any month with data)
+    const monthSet = new Set<string>();
+    const currentYM = getCurrentMonthPrefixIST();
+    const [curY, curM] = currentYM.split('-').map(Number);
+    for (let i = 0; i < 6; i++) {
+      const d = new Date(Date.UTC(curY, curM - 1 - i, 1));
+      const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+      monthSet.add(ym);
+    }
+
+    // Bucket structures per YYYY-MM
+    interface MonthBucket {
+      leadsAssigned: number;
+      leadsCalled: number;
+      leadsPending: number;
+      interestedLeads: number;
+      callbackLeads: number;
+      convertedLeads: number;
+      leadDialsSum: number;
+      callLogsCount: number;
+      interestedCalls: number;
+      verifiedDealsCount: number;
+      verifiedRevenue: number;
+      batchCounts: Map<string, number>;
+    }
+
+    const createBucket = (): MonthBucket => ({
+      leadsAssigned: 0,
+      leadsCalled: 0,
+      leadsPending: 0,
+      interestedLeads: 0,
+      callbackLeads: 0,
+      convertedLeads: 0,
+      leadDialsSum: 0,
+      callLogsCount: 0,
+      interestedCalls: 0,
+      verifiedDealsCount: 0,
+      verifiedRevenue: 0,
+      batchCounts: new Map<string, number>(),
+    });
+
+    const buckets = new Map<string, MonthBucket>();
+    const getBucket = (ym: string) => {
+      monthSet.add(ym);
+      let b = buckets.get(ym);
+      if (!b) {
+        b = createBucket();
+        buckets.set(ym, b);
+      }
+      return b;
+    };
+
+    for (const l of leads) {
+      const dateStr = extractDateIST(l.assignedDate) || extractDateIST(l.createdAt) || currentYM + '-01';
+      const ym = dateStr.slice(0, 7);
+      const b = getBucket(ym);
+      b.leadsAssigned += 1;
+      const status = (l.status || 'PENDING').toUpperCase();
+      const calls = Number(l.callCount) || 0;
+      if (status !== 'PENDING' || calls > 0) {
+        b.leadsCalled += 1;
+      } else {
+        b.leadsPending += 1;
+      }
+      if (status === 'INTERESTED') b.interestedLeads += 1;
+      if (status === 'CALLBACK') b.callbackLeads += 1;
+      if (status === 'CONVERTED') b.convertedLeads += 1;
+      b.leadDialsSum += calls > 0 ? calls : (status !== 'PENDING' ? 1 : 0);
+
+      if (l.batchId && l.batchId !== 'crm-pipeline') {
+        b.batchCounts.set(l.batchId, (b.batchCounts.get(l.batchId) || 0) + 1);
+      }
+    }
+
+    for (const c of callLogs) {
+      const dateStr = extractDateIST(c.date) || extractDateIST(c.createdAt) || extractDateIST(c.timestamp);
+      if (!dateStr) continue;
+      const ym = dateStr.slice(0, 7);
+      const b = getBucket(ym);
+      b.callLogsCount += 1;
+      if ((c.outcome || '').toUpperCase() === 'INTERESTED') {
+        b.interestedCalls += 1;
+      }
+    }
+
+    for (const p of empVerifiedPayments) {
+      const dateStr = getPaymentDateIST(p);
+      if (!dateStr) continue;
+      const ym = dateStr.slice(0, 7);
+      const b = getBucket(ym);
+      b.verifiedDealsCount += 1;
+      b.verifiedRevenue += Number(p.dealAmount) || 0;
+    }
+
+    const sortedMonths = Array.from(monthSet).sort((a, b) => b.localeCompare(a));
+
+    const formatMonthLabels = (ym: string) => {
+      const [y, m] = ym.split('-').map(Number);
+      const d = new Date(Date.UTC(y, (m || 1) - 1, 1));
+      const shortMonth = d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
+      const longMonth = d.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
+      return {
+        label: `${shortMonth} ${y}`,
+        fullLabel: `${longMonth} ${y}`,
+      };
+    };
+
+    const months = sortedMonths.map((ym) => {
+      const b = buckets.get(ym) || createBucket();
+      const { label, fullLabel } = formatMonthLabels(ym);
+      const batches = Array.from(b.batchCounts.entries()).map(([batchId, count]) => {
+        const meta = batchMap.get(batchId);
+        return {
+          id: batchId,
+          fileName: meta?.fileName || `Lead Batch (${batchId})`,
+          uploadedAt: meta?.uploadedAt || ym,
+          leadsCount: count,
+        };
+      });
+
+      const totalDials = Math.max(b.callLogsCount, b.leadDialsSum);
+      const interestedCount = Math.max(b.interestedLeads, b.interestedCalls);
+      const wonCount = Math.max(b.verifiedDealsCount, b.convertedLeads);
+      const targetPercent = salesTarget > 0 ? Math.round((b.verifiedRevenue / salesTarget) * 100) : 0;
+
+      return {
+        month: ym,
+        label,
+        fullLabel,
+        isCurrentMonth: ym === currentYM,
+        leadsAssigned: b.leadsAssigned,
+        leadsCalled: b.leadsCalled,
+        leadsPending: b.leadsPending,
+        interestedCount,
+        callbackCount: b.callbackLeads,
+        wonCount,
+        verifiedDealsCount: b.verifiedDealsCount,
+        totalDials,
+        salesAchieved: b.verifiedRevenue,
+        salesTarget,
+        targetPercent,
+        batchesCount: batches.length,
+        batches,
+      };
+    });
+
+    return res.status(200).json({
+      employeeId: empId,
+      empCode,
+      employeeName: empName,
+      currentMonth: currentYM,
+      salesTarget,
+      totalAllTimeLeads: leads.length,
+      totalAllTimeSales: salesMaps.allTimeByCaller.get(empNameLower) ?? 0,
+      months,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// POST /api/team-members
+router.post('/', (req: Request, res: Response) => {
+  try {
+    const {
+      id, empCode, name, avatar, role, group, phone,
+      attendanceStatus, checkInTime, checkInMethod,
+      dialsToday, goalCalls, connected, interested,
+      salesAchieved, salesTarget, conversionRate, portal, email, password,
+      bankName, bankAccountNumber, bankIfscCode,
+      panDocumentName, panDocumentUrl, aadhaarDocumentName, aadhaarDocumentUrl,
+      salary, joiningDate, address
+    } = req.body;
+
+    const memberId = id || `tm-${Date.now()}`;
+    const finalEmpCode = empCode || `TNX-${Math.floor(8000 + Math.random() * 999)}`;
+    const finalName = name || 'Team Member';
+    const finalRole = role || 'Sales Executive';
+    const finalGroup = group || 'General';
+    const finalPhone = phone || '';
+    const finalEmail = email ? email.toLowerCase().trim() : `${finalEmpCode.toLowerCase()}@tradenexus.com`;
+    const finalPortal = portal || 'telecaller';
+
+    // 0. Validate uniqueness: Check if email or phone is already in use by an existing employee
+    if (finalEmail) {
+      const existingEmailMember = db.prepare('SELECT id, empCode, name, email FROM team_members WHERE LOWER(email) = LOWER(?)').get(finalEmail) as any;
+      const existingEmailUser = db.prepare('SELECT id, email, name, role, empCode FROM users WHERE LOWER(email) = LOWER(?)').get(finalEmail) as any;
+      if (existingEmailMember || existingEmailUser) {
+        const match = existingEmailMember || existingEmailUser;
+        return res.status(400).json({
+          error: `Cannot create employee: Email "${finalEmail}" is already registered to ${match.name} (${match.empCode || 'Existing Account'}). Please use a different email address.`
+        });
+      }
+    }
+
+    const cleanDigitsPhone = finalPhone.replace(/[^0-9]/g, '');
+    if (cleanDigitsPhone.length >= 10) {
+      const phoneLast10 = cleanDigitsPhone.slice(-10);
+      const existingPhoneMember = db.prepare(`
+        SELECT id, empCode, name, phone FROM team_members 
+        WHERE replace(replace(replace(replace(replace(phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')', '') LIKE '%' || ?
+      `).get(phoneLast10) as any;
+      if (existingPhoneMember) {
+        return res.status(400).json({
+          error: `Cannot create employee: Phone number "${finalPhone}" is already registered to ${existingPhoneMember.name} (${existingPhoneMember.empCode}). Please use a different phone number.`
+        });
+      }
+    }
+
+    const createAtomic = db.transaction(() => {
+      // 1. Insert Team Member
+      const finalPassword = password || 'Trade@1234';
+      const finalBloodGroup = req.body.bloodGroup || 'O+';
+      const finalDob = req.body.dob || null;
+      const finalEmergencyPhone = req.body.emergencyPhone || finalPhone;
+      const finalEmployeeType = req.body.employeeType || 'Full Time';
+      const finalAvatar = avatar || req.body.avatar || 'TM';
+
+      const finalCompanyAddress = req.body.companyAddress || 'RR westbrook,6th main HSR layout , beside pizza artistry, Bengaluru 102';
+      const finalCompanyPhone = req.body.companyPhone || '+919483001083';
+      const finalCompanyEmail = req.body.companyEmail || 'hr@tradenexustradesmart.in';
+      const finalCompanyWebsite = req.body.companyWebsite || 'tradenexustradesmart.co.in';
+      const finalSignatoryName = req.body.signatoryName || 'T. Vidhya Sagar';
+      const finalSignatoryRole = req.body.signatoryRole || 'Chief Executive Officer';
+
+      db.prepare(`
+        INSERT INTO team_members (
+          id, empCode, name, avatar, role, groupName, phone, attendanceStatus, 
+          checkInTime, checkInMethod, dialsToday, goalCalls, connected, interested, 
+          salesAchieved, salesTarget, conversionRate, portal, email, password,
+          bankName, bankAccountNumber, bankIfscCode,
+          panDocumentName, panDocumentUrl, aadhaarDocumentName, aadhaarDocumentUrl,
+          salary, joiningDate, address, bloodGroup, dob, emergencyPhone, employeeType,
+          companyAddress, companyPhone, companyEmail, companyWebsite, signatoryName, signatoryRole
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        memberId, finalEmpCode, finalName,
+        finalAvatar, finalRole, finalGroup,
+        finalPhone, attendanceStatus || 'ABSENT', checkInTime || null, checkInMethod || '',
+        dialsToday ? Number(dialsToday) : 0, goalCalls ? Number(goalCalls) : 0,
+        connected ? Number(connected) : 0, interested ? Number(interested) : 0,
+        salesAchieved ? Number(salesAchieved) : 0, salesTarget ? Number(salesTarget) : 0,
+        conversionRate ? Number(conversionRate) : 0,
+        finalPortal, finalEmail, finalPassword,
+        bankName || null, bankAccountNumber || null, bankIfscCode || null,
+        panDocumentName || null, panDocumentUrl || null,
+        aadhaarDocumentName || null, aadhaarDocumentUrl || null,
+        salary ? Number(salary) : null, joiningDate || null, address || null,
+        finalBloodGroup, finalDob, finalEmergencyPhone, finalEmployeeType,
+        finalCompanyAddress, finalCompanyPhone, finalCompanyEmail, finalCompanyWebsite,
+        finalSignatoryName, finalSignatoryRole
+      );
+
+      // 2. Insert Employee Profile
+      db.prepare(`
+        INSERT INTO employee_profiles (id, empCode, name, roleTitle, department, teamName, teamLeaderName, email, phone, joinDate, bloodGroup, faceIdStatus, checkInTime, totalLeaveBalance, dob, avatar, emergencyPhone)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        memberId, finalEmpCode, finalName, finalRole, finalGroup, finalGroup, '',
+        finalEmail, finalPhone, joiningDate || new Date().toISOString().split('T')[0], finalBloodGroup, 'NOT_CHECKED_IN', '', 14,
+        finalDob, finalAvatar, finalEmergencyPhone
+      );
+
+      // 3. Insert User Credentials for login (strictly avoid converting or overwriting existing user accounts)
+      if (finalEmail) {
+        const rawPassword = password || 'Trade@1234';
+        const passHash = hashPassword(rawPassword);
+        db.prepare(`
+          INSERT INTO users (id, email, passwordHash, name, role, empCode, employeeId, active)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+        `).run(
+          `usr-${Date.now()}`,
+          finalEmail,
+          passHash,
+          finalName,
+          finalPortal,
+          finalEmpCode,
+          memberId
+        );
+      }
+
+      // 4. Insert isolated clean baseline stats for this employee
+      db.prepare(`
+        INSERT OR IGNORE INTO telecaller_stats (
+          id, todayGoalCalls, dialsMade, connected, interested, rejected, averageCallDurationSec, monthlySalesTarget, monthlySalesAchieved
+        ) VALUES (?, ?, 0, 0, 0, 0, 0, ?, 0)
+      `).run(`stat-${memberId}`, goalCalls ? Number(goalCalls) : 60, salesTarget ? Number(salesTarget) : 200000);
+    });
+
+    createAtomic();
+
+    const created = db.prepare('SELECT id, empCode, name, avatar, role, groupName as "group", phone, emergencyPhone, dob, employeeType, attendanceStatus, checkInTime, checkInMethod, dialsToday, goalCalls, connected, interested, salesAchieved, salesTarget, conversionRate, portal, email, password, active, deactivatedOn, bankName, bankAccountNumber, bankIfscCode, panDocumentName, panDocumentUrl, aadhaarDocumentName, aadhaarDocumentUrl, salary, joiningDate, address, bloodGroup, companyAddress, companyPhone, companyEmail, companyWebsite, signatoryName, signatoryRole FROM team_members WHERE id = ?').get(memberId);
+    if (created) {
+      try {
+        getSocketService().emitToAll('team_member:created', created);
+        getSocketService().emitToAll('resource:invalidated', { resource: 'teamMembers' });
+      } catch (_) {}
+    }
+    return res.status(201).json(created);
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// PUT /api/team-members/targets/batch (Bulk update sales targets & call goals)
+router.put('/targets/batch', (req: Request, res: Response) => {
+  try {
+    const { targets } = req.body;
+    if (!Array.isArray(targets) || targets.length === 0) {
+      return res.status(400).json({ error: 'targets array is required' });
+    }
+
+    const updateMemberTarget = db.prepare(`
+      UPDATE team_members
+      SET salesTarget = CASE WHEN ? IS NOT NULL THEN ? ELSE salesTarget END,
+          goalCalls = CASE WHEN ? IS NOT NULL THEN ? ELSE goalCalls END
+      WHERE id = ? OR empCode = ?
+    `);
+
+    const updateStatsTarget = db.prepare(`
+      UPDATE telecaller_stats
+      SET monthlySalesTarget = CASE WHEN ? IS NOT NULL THEN ? ELSE monthlySalesTarget END,
+          todayGoalCalls = CASE WHEN ? IS NOT NULL THEN ? ELSE todayGoalCalls END,
+          updatedAt = CURRENT_TIMESTAMP
+      WHERE id = ? OR id = ?
+    `);
+
+    const insertStatsIfMissing = db.prepare(`
+      INSERT OR IGNORE INTO telecaller_stats (
+        id, todayGoalCalls, dialsMade, connected, interested, rejected, averageCallDurationSec, monthlySalesTarget, monthlySalesAchieved
+      ) VALUES (?, ?, 0, 0, 0, 0, 0, ?, 0)
+    `);
+
+    const runBatch = db.transaction((items: any[]) => {
+      let count = 0;
+      for (const item of items) {
+        const id = String(item.id || '').trim();
+        if (!id) continue;
+        const salesTarget = item.salesTarget !== undefined && item.salesTarget !== null ? Number(item.salesTarget) : null;
+        const goalCalls = item.goalCalls !== undefined && item.goalCalls !== null ? Number(item.goalCalls) : null;
+
+        updateMemberTarget.run(salesTarget, salesTarget, goalCalls, goalCalls, id, id);
+
+        const statId = `stat-${id}`;
+        insertStatsIfMissing.run(statId, goalCalls ?? 60, salesTarget ?? 200000);
+        updateStatsTarget.run(salesTarget, salesTarget, goalCalls, goalCalls, statId, id);
+        count++;
+      }
+      return count;
+    });
+
+    const updatedCount = runBatch(targets);
+
+    const salesMaps = computeVerifiedSalesMaps(db);
+    const allMembers = (db.prepare(`
+      SELECT id, empCode, name, avatar, role, groupName as "group", phone, emergencyPhone, dob, employeeType, 
+             attendanceStatus, checkInTime, checkInMethod, dialsToday, goalCalls, connected, interested, 
+             salesAchieved, salesTarget, conversionRate, portal, email, password, active, deactivatedOn, 
+             bankName, bankAccountNumber, bankIfscCode, panDocumentName, panDocumentUrl, 
+             aadhaarDocumentName, aadhaarDocumentUrl, salary, joiningDate, address, bloodGroup,
+             companyAddress, companyPhone, companyEmail, companyWebsite, signatoryName, signatoryRole 
+      FROM team_members
+    `).all() as any[]).map((m) => {
+      const callerKey = (m.name || '').trim().toLowerCase();
+      return {
+        ...m,
+        salesAchieved: salesMaps.monthlyByCaller.get(callerKey) ?? 0,
+        allTimeSalesAchieved: salesMaps.allTimeByCaller.get(callerKey) ?? 0,
+      };
+    });
+
+    return res.status(200).json({ success: true, updatedCount, members: allMembers });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// PUT /api/team-members/:id
+router.put('/:id', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const existing = db.prepare(`
+      SELECT id, empCode, name, avatar, role, groupName as "group", phone, emergencyPhone, dob, employeeType, 
+             attendanceStatus, checkInTime, checkInMethod, dialsToday, goalCalls, connected, interested, 
+             salesAchieved, salesTarget, conversionRate, portal, email, password, active, 
+             deactivatedOn, bankName, bankAccountNumber, bankIfscCode, panDocumentName, 
+             panDocumentUrl, aadhaarDocumentName, aadhaarDocumentUrl, salary, joiningDate, 
+             address, bloodGroup, companyAddress, companyPhone, companyEmail, companyWebsite,
+             signatoryName, signatoryRole 
+      FROM team_members 
+      WHERE id = ? OR empCode = ?
+    `).get(id, id) as any;
+    if (!existing) {
+      return res.status(404).json({ error: 'Team member not found' });
+    }
+
+    const user = req.user;
+    if (user && user.role === 'team_leader') {
+      const leaderId = user.employeeId || user.id;
+      const leaderEmpCode = user.empCode || '';
+      const leaderName = user.name || '';
+      const leaderRow = db.prepare(`
+        SELECT groupName FROM team_members 
+        WHERE id = ? OR empCode = ? OR LOWER(name) = LOWER(?)
+        LIMIT 1
+      `).get(leaderId, leaderEmpCode, leaderName) as any;
+      const groupRow = db.prepare('SELECT name FROM team_groups WHERE LOWER(leaderName) = LOWER(?) LIMIT 1').get(leaderName) as any;
+      const squadName = leaderRow?.groupName || groupRow?.name || '';
+      const memberGroup = existing.group || existing.groupName || '';
+      if (squadName && memberGroup.toLowerCase() !== squadName.toLowerCase() && existing.id !== leaderId) {
+        return res.status(403).json({ error: 'Forbidden: Team Leader cannot modify staff outside assigned squad' });
+      }
+    }
+
+    const targetGroup = req.body.group !== undefined
+      ? req.body.group
+      : (req.body.groupName !== undefined ? req.body.groupName : (existing.group || 'Unassigned'));
+
+    const finalEmployeeType = req.body.employeeType !== undefined
+      ? req.body.employeeType
+      : (req.body.empType !== undefined ? req.body.empType : (existing.employeeType || 'Full Time'));
+
+    const finalEmergencyPhone = req.body.emergencyPhone !== undefined
+      ? req.body.emergencyPhone
+      : (req.body.phone !== undefined ? req.body.phone : (existing.emergencyPhone || existing.phone || null));
+
+    const finalBloodGroup = req.body.bloodGroup !== undefined
+      ? req.body.bloodGroup
+      : (existing.bloodGroup || 'O+');
+
+    const finalDob = req.body.dob !== undefined
+      ? req.body.dob
+      : (existing.dob || null);
+
+    const finalCompanyAddress = req.body.companyAddress !== undefined ? req.body.companyAddress : (existing.companyAddress || null);
+    const finalCompanyPhone = req.body.companyPhone !== undefined ? req.body.companyPhone : (existing.companyPhone || null);
+    const finalCompanyEmail = req.body.companyEmail !== undefined ? req.body.companyEmail : (existing.companyEmail || null);
+    const finalCompanyWebsite = req.body.companyWebsite !== undefined ? req.body.companyWebsite : (existing.companyWebsite || null);
+    const finalSignatoryName = req.body.signatoryName !== undefined ? req.body.signatoryName : (existing.signatoryName || null);
+    const finalSignatoryRole = req.body.signatoryRole !== undefined ? req.body.signatoryRole : (existing.signatoryRole || null);
+
+    const merged = {
+      ...existing,
+      ...req.body,
+      group: targetGroup,
+      employeeType: finalEmployeeType,
+      emergencyPhone: finalEmergencyPhone,
+      bloodGroup: finalBloodGroup,
+      dob: finalDob,
+      companyAddress: finalCompanyAddress,
+      companyPhone: finalCompanyPhone,
+      companyEmail: finalCompanyEmail,
+      companyWebsite: finalCompanyWebsite,
+      signatoryName: finalSignatoryName,
+      signatoryRole: finalSignatoryRole,
+    };
+
+    db.prepare(`
+      UPDATE team_members 
+      SET empCode = ?, name = ?, avatar = ?, role = ?, groupName = ?, phone = ?, 
+          attendanceStatus = ?, checkInTime = ?, checkInMethod = ?, dialsToday = ?, 
+          goalCalls = ?, connected = ?, interested = ?, salesAchieved = ?, 
+          salesTarget = ?, conversionRate = ?, portal = ?, email = ?,
+          password = ?,
+          active = ?, deactivatedOn = ?,
+          bankName = ?, bankAccountNumber = ?, bankIfscCode = ?,
+          panDocumentName = ?, panDocumentUrl = ?,
+          aadhaarDocumentName = ?, aadhaarDocumentUrl = ?,
+          salary = ?, joiningDate = ?, address = ?, bloodGroup = ?,
+          dob = ?, emergencyPhone = ?, employeeType = ?,
+          companyAddress = ?, companyPhone = ?, companyEmail = ?, companyWebsite = ?,
+          signatoryName = ?, signatoryRole = ?
+      WHERE id = ? OR empCode = ?
+    `).run(
+      merged.empCode, merged.name, merged.avatar, merged.role, targetGroup, merged.phone,
+      merged.attendanceStatus, merged.checkInTime, merged.checkInMethod, merged.dialsToday,
+      merged.goalCalls, merged.connected, merged.interested, merged.salesAchieved,
+      merged.salesTarget, merged.conversionRate,
+      merged.portal || 'telecaller', merged.email ?? null,
+      merged.password || existing.password || 'Trade@1234',
+      merged.active === 0 ? 0 : 1, merged.deactivatedOn ?? null,
+      merged.bankName ?? null, merged.bankAccountNumber ?? null, merged.bankIfscCode ?? null,
+      merged.panDocumentName ?? null, merged.panDocumentUrl ?? null,
+      merged.aadhaarDocumentName ?? null, merged.aadhaarDocumentUrl ?? null,
+      merged.salary != null ? Number(merged.salary) : null, merged.joiningDate ?? null, merged.address ?? null,
+      finalBloodGroup,
+      finalDob,
+      finalEmergencyPhone,
+      finalEmployeeType,
+      finalCompanyAddress,
+      finalCompanyPhone,
+      finalCompanyEmail,
+      finalCompanyWebsite,
+      finalSignatoryName,
+      finalSignatoryRole,
+      existing.id, existing.empCode
+    );
+
+    // Also update employee_profiles if present
+    try {
+      db.prepare(`
+        UPDATE employee_profiles
+        SET name = ?, roleTitle = ?, department = ?, teamName = ?, email = ?, phone = ?, joinDate = coalesce(?, joinDate), bloodGroup = coalesce(?, bloodGroup), dob = coalesce(?, dob), avatar = coalesce(?, avatar), emergencyPhone = coalesce(?, emergencyPhone)
+        WHERE id = ? OR empCode = ?
+      `).run(merged.name, merged.role, targetGroup, targetGroup, merged.email, merged.phone, merged.joiningDate || null, finalBloodGroup, finalDob, merged.avatar || null, finalEmergencyPhone, existing.id, existing.empCode);
+    } catch { }
+
+    // Synchronize squad member counts in team_groups
+    try {
+      db.prepare(`
+        UPDATE team_groups
+        SET memberCount = (
+          SELECT COUNT(*) FROM team_members 
+          WHERE LOWER(team_members.groupName) = LOWER(team_groups.name) 
+          AND team_members.active = 1
+        )
+      `).run();
+    } catch (_) { }
+
+    // Sync password to users table if a new plain-text password was provided
+    if (req.body.password) {
+      try {
+        const newHash = hashPassword(req.body.password);
+        // Update by employeeId first, then fall back to empCode, then email
+        const affected = db.prepare(`
+          UPDATE users SET passwordHash = ?, name = ? WHERE employeeId = ?
+        `).run(newHash, merged.name, existing.id);
+        if ((affected as any).changes === 0) {
+          const aff2 = db.prepare(`
+            UPDATE users SET passwordHash = ?, name = ? WHERE empCode = ?
+          `).run(newHash, merged.name, existing.empCode);
+          if ((aff2 as any).changes === 0 && (merged.email || existing.email)) {
+            const cleanTargetEmail = (merged.email || existing.email).trim().toLowerCase();
+            db.prepare(`
+              UPDATE users SET passwordHash = ?, name = ? WHERE LOWER(email) = LOWER(?)
+            `).run(newHash, merged.name, cleanTargetEmail);
+          }
+        }
+      } catch (_) { }
+    }
+
+    // Sync targets to telecaller_stats if salesTarget or goalCalls were updated
+    if (req.body.salesTarget !== undefined || req.body.goalCalls !== undefined) {
+      try {
+        const statId = `stat-${existing.id}`;
+        const newTarget = req.body.salesTarget !== undefined ? Number(req.body.salesTarget) : undefined;
+        const newGoal = req.body.goalCalls !== undefined ? Number(req.body.goalCalls) : undefined;
+        db.prepare(`
+          INSERT OR IGNORE INTO telecaller_stats (
+            id, todayGoalCalls, dialsMade, connected, interested, rejected, averageCallDurationSec, monthlySalesTarget, monthlySalesAchieved
+          ) VALUES (?, ?, 0, 0, 0, 0, 0, ?, 0)
+        `).run(statId, newGoal ?? 60, newTarget ?? 200000);
+
+        db.prepare(`
+          UPDATE telecaller_stats
+          SET monthlySalesTarget = CASE WHEN ? IS NOT NULL THEN ? ELSE monthlySalesTarget END,
+              todayGoalCalls = CASE WHEN ? IS NOT NULL THEN ? ELSE todayGoalCalls END,
+              updatedAt = CURRENT_TIMESTAMP
+          WHERE id = ? OR id = ? OR id = ?
+        `).run(
+          newTarget !== undefined ? newTarget : null,
+          newTarget !== undefined ? newTarget : null,
+          newGoal !== undefined ? newGoal : null,
+          newGoal !== undefined ? newGoal : null,
+          statId,
+          existing.id,
+          existing.empCode
+        );
+      } catch (_) { }
+    }
+
+    const rawUpdated = db.prepare(`
+      SELECT id, empCode, name, avatar, role, groupName as "group", phone, emergencyPhone, dob, employeeType, 
+             attendanceStatus, checkInTime, checkInMethod, dialsToday, goalCalls, connected, interested, 
+             salesAchieved, salesTarget, conversionRate, portal, email, password, active, deactivatedOn, 
+             bankName, bankAccountNumber, bankIfscCode, panDocumentName, panDocumentUrl, 
+             aadhaarDocumentName, aadhaarDocumentUrl, salary, joiningDate, address, bloodGroup,
+             companyAddress, companyPhone, companyEmail, companyWebsite, signatoryName, signatoryRole 
+      FROM team_members 
+      WHERE id = ? OR empCode = ?
+    `).get(existing.id, merged.empCode || existing.empCode) as any;
+    const salesMaps = computeVerifiedSalesMaps(db);
+    const updated = rawUpdated
+      ? {
+          ...rawUpdated,
+          salesAchieved: salesMaps.monthlyByCaller.get((rawUpdated.name || '').trim().toLowerCase()) ?? 0,
+          allTimeSalesAchieved: salesMaps.allTimeByCaller.get((rawUpdated.name || '').trim().toLowerCase()) ?? 0,
+        }
+      : null;
+    if (updated) {
+      try {
+        getSocketService().emitToAll('team_member:updated', updated);
+        getSocketService().emitToAll('resource:invalidated', { resource: 'teamMembers' });
+      } catch (_) {}
+    }
+    return res.status(200).json(updated);
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// DELETE /api/team-members/:id (Admin Only)
+router.delete('/:id', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const user = req.user;
+
+    // Only Admin can delete employees
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: Only Admin can delete employees' });
+    }
+
+    // Find target employee by id or empCode
+    const existing = (db.prepare(`
+      SELECT id, empCode, name, groupName, portal, email 
+      FROM team_members 
+      WHERE id = ? OR empCode = ?
+    `).get(id, id) || db.prepare(`
+      SELECT id, empCode, name, teamName as groupName, email 
+      FROM employee_profiles 
+      WHERE id = ? OR empCode = ?
+    `).get(id, id)) as any;
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+
+    // Safety: Protect Super Admin accounts from deletion
+    const isSuperAdmin =
+      existing.portal === 'admin' ||
+      existing.empCode === 'TNX-AD01' ||
+      (existing.email && existing.email.toLowerCase() === 'sagarsuchi26@gmail.com') ||
+      (user && (user.employeeId === existing.id || user.empCode === existing.empCode));
+
+    if (isSuperAdmin) {
+      return res.status(400).json({ error: 'Super Admin account cannot be deleted' });
+    }
+
+    const empId = existing.id;
+    const empCode = existing.empCode;
+    const email = existing.email ? existing.email.toLowerCase().trim() : null;
+    const name = existing.name;
+
+    const deleteAtomic = db.transaction(() => {
+      // 1. Delete from team_members
+      db.prepare('DELETE FROM team_members WHERE id = ? OR empCode = ?').run(empId, empCode);
+
+      // 2. Delete from employee_profiles
+      db.prepare('DELETE FROM employee_profiles WHERE id = ? OR empCode = ?').run(empId, empCode);
+
+      // 3. Delete from users (credentials), protecting admin accounts
+      if (email) {
+        db.prepare('DELETE FROM users WHERE (employeeId = ? OR empCode = ? OR LOWER(email) = ?) AND role != ?').run(empId, empCode, email, 'admin');
+      } else {
+        db.prepare('DELETE FROM users WHERE (employeeId = ? OR empCode = ?) AND role != ?').run(empId, empCode, 'admin');
+      }
+
+      // 4. Delete face biometric profiles
+      try {
+        db.prepare('DELETE FROM face_biometric_profiles WHERE employeeId = ? OR employeeName = ?').run(empId, name);
+      } catch (_) { }
+
+      // 5. Delete employee documents
+      try {
+        db.prepare('DELETE FROM employee_documents WHERE employeeId = ?').run(empId);
+      } catch (_) { }
+
+      // 6. PRESERVE call logs: Client interaction history must NEVER be lost
+      // (Call logs are retained with historical attribution to the closing rep)
+
+      // 7. Delete daily attendance records for this employee (optional cleanup)
+      try {
+        db.prepare(`DELETE FROM attendance_records WHERE employeeId = ? OR employeeId = ? OR LOWER(employeeName) = LOWER(?)`).run(empId, empCode, name);
+      } catch (_) { }
+
+      // 8. PRESERVE payment verifications: Company revenue, audited won deals & financials must NEVER be deleted!
+      // (Payment records remain in the sales ledger permanently attributed to this rep)
+
+      // 9. Delete leave requests submitted by this employee
+      try {
+        db.prepare(`DELETE FROM leave_requests WHERE LOWER(employeeName) = LOWER(?) OR employeeCode = ?`).run(name, empCode);
+      } catch (_) { }
+
+      // 10. Safely handle assigned leads:
+      // - Converted / Won leads remain permanently intact with client data preserved
+      // - Fresh / uncalled / pending leads are reclaimed into the Unassigned Pool for reallocation
+      try {
+        db.prepare(`
+          UPDATE assigned_leads 
+          SET assignedToEmployeeId = '', assignedToEmployeeName = 'Unassigned', updatedAt = CURRENT_TIMESTAMP
+          WHERE (assignedToEmployeeId = ? OR assignedToEmployeeId = ? OR LOWER(assignedToEmployeeName) = LOWER(?))
+            AND (status = 'PENDING' OR callCount = 0)
+        `).run(empId, empCode, name);
+      } catch (_) { }
+
+      // 11. If this person is a Team Leader of any team, clear the leader in team_groups
+      try {
+        db.prepare(`
+          UPDATE team_groups 
+          SET leaderName = '', leaderEmpCode = '' 
+          WHERE leaderEmpCode = ? OR LOWER(leaderName) = LOWER(?)
+        `).run(empCode, name);
+      } catch (_) { }
+
+      // 12. Delete offer letters belonging to this candidate/employee
+      try {
+        db.prepare(`
+          DELETE FROM offer_letters 
+          WHERE LOWER(candidateName) = LOWER(?) OR (candidateEmail IS NOT NULL AND LOWER(candidateEmail) = LOWER(?))
+        `).run(name, email || '');
+      } catch (_) { }
+
+      // 13. Delete payslips belonging to this employee
+      try {
+        db.prepare(`
+          DELETE FROM payslips 
+          WHERE employeeId = ? OR empCode = ? OR LOWER(employeeName) = LOWER(?)
+        `).run(empId, empCode, name);
+      } catch (_) { }
+
+      // 14. Update team groups member count
+      try {
+        db.prepare(`
+          UPDATE team_groups 
+          SET memberCount = (
+            SELECT COUNT(*) FROM team_members WHERE LOWER(groupName) = LOWER(team_groups.name)
+          )
+        `).run();
+      } catch (_) { }
+    });
+
+    deleteAtomic();
+
+    console.log(`[Admin Action] Deleted employee: ${name} (${empCode}) [ID: ${empId}]`);
+
+    try {
+      getSocketService().emitToAll('team_member:deleted', { id: empId, empCode });
+      getSocketService().emitToAll('resource:invalidated', { resource: 'teamMembers' });
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: true,
+      deletedId: empId,
+      empCode,
+      name,
+      message: `Employee ${name} (${empCode}) permanently deleted.`
+    });
+  } catch (error) {
+    console.error('Error deleting employee:', error);
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+export default router;

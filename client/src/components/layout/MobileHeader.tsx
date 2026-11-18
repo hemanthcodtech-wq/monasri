@@ -1,0 +1,111 @@
+import React from 'react';
+import { useApp } from '../../context/AppContext';
+import { TradeNexusLogo } from '../common/TradeNexusLogo';
+import { Bell, LogOut, RotateCw } from 'lucide-react';
+
+export const MobileHeader: React.FC = () => {
+  const { 
+    currentUser, 
+    profile, 
+    currentRole, 
+    logout, 
+    isRefreshing, 
+    refreshAllData, 
+    setIsNotificationDrawerOpen, 
+    unreadNotificationCount,
+    setActiveTab,
+  } = useApp();
+
+  const activeName = currentUser?.name || profile?.name;
+  const initials = activeName
+    ? activeName
+        .trim()
+        .split(' ')
+        .filter(Boolean)
+        .map((w) => w[0])
+        .join('')
+        .slice(0, 2)
+        .toUpperCase()
+    : currentRole === 'admin'
+    ? 'AD'
+    : currentRole === 'hr'
+    ? 'HR'
+    : currentRole === 'team_leader'
+    ? 'TL'
+    : 'EM';
+
+  const roleLabel =
+    currentRole === 'admin'
+      ? 'Admin'
+      : currentRole === 'hr'
+      ? 'HR'
+      : currentRole === 'team_leader'
+      ? 'Leader'
+      : 'Sales';
+
+  return (
+    <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-4 sm:px-6 lg:px-8 py-2.5 shadow-xs">
+      <div className="w-full max-w-7xl mx-auto flex items-center justify-between">
+        {/* Official Trade Nexus Logo with Text */}
+        <TradeNexusLogo size="sm" showText={true} />
+
+        {/* Right: Authenticated User Badge, Refresh, Exit Account Button & Notification Bell */}
+        <div className="flex items-center gap-1.5 sm:gap-2">
+        {activeName && (
+          <button 
+            type="button"
+            onClick={() => {
+              if (currentRole === 'team_leader' || currentRole === 'telecaller') {
+                setActiveTab('profile');
+              }
+            }}
+            title={`Signed in as ${activeName} (${roleLabel}) — Tap to view ID Card & Official Documents`}
+            className="flex items-center gap-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200/90 hover:border-[#00C9A7]/50 pl-2 pr-1 py-1 rounded-xl shadow-2xs max-w-[130px] transition-all cursor-pointer active:scale-95 text-left"
+          >
+            <span className="text-[11px] font-bold text-[#0A2540] truncate">
+              {activeName.split(' ')[0]}
+            </span>
+            <span className="w-5 h-5 rounded-md bg-[#0A2540] text-[#00C9A7] font-black text-[9px] flex items-center justify-center flex-shrink-0">
+              {initials}
+            </span>
+          </button>
+        )}
+
+
+        {/* Small Exit Account / Logout Button beside Profile Badge */}
+        <button
+          onClick={() => refreshAllData()}
+          disabled={isRefreshing}
+          title="Refresh All Data"
+          className="w-8 h-8 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-200/90 text-[#00A88B] flex items-center justify-center shadow-2xs active:scale-95 transition-all flex-shrink-0 cursor-pointer"
+        >
+          <RotateCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+        </button>
+
+        <button
+          onClick={logout}
+          title="Exit Panel / Logout"
+          className="w-8 h-8 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200/80 text-rose-600 flex items-center justify-center shadow-2xs active:scale-95 transition-all flex-shrink-0 cursor-pointer"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+        </button>
+
+        <button
+          onClick={() => setIsNotificationDrawerOpen(true)}
+          title="Open In-App Notifications"
+          className="relative w-8 h-8 rounded-xl bg-slate-100 border border-slate-200 hover:border-[#00C9A7]/50 flex items-center justify-center text-slate-600 hover:text-[#0A2540] shadow-2xs active:scale-95 transition-all flex-shrink-0 cursor-pointer"
+        >
+          <Bell className="w-3.5 h-3.5" />
+          {unreadNotificationCount > 0 ? (
+            <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-[#00C9A7] text-[#0A2540] text-[9px] font-black flex items-center justify-center ring-2 ring-white">
+              {unreadNotificationCount > 9 ? '9+' : unreadNotificationCount}
+            </span>
+          ) : (
+            <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-emerald-500 ring-2 ring-white" />
+          )}
+        </button>
+      </div>
+      </div>
+    </header>
+  );
+};

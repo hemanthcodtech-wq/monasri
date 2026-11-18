@@ -1,0 +1,2726 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { useApp } from '../context/AppContext';
+import { useScreenData } from '../hooks/useScreenData';
+import { api } from '../services/api';
+import { getTodayDateIST, getLeadDate, isDateInPeriodIST, getDateRangeIST, normalizeDateToYMD } from '../utils/dateUtils';
+import { evaluateMemberAttendanceForDate } from '../utils/attendanceUtils';
+import { getPaymentDateIST, isPaymentInPeriod, paymentBelongsTo } from '../utils/revenueUtils';
+import { dialPhoneNumber } from '../utils/phoneCaller';
+import { 
+  Users, 
+  PhoneCall, 
+  TrendingUp, 
+  CheckCircle2, 
+  XCircle, 
+  ChevronRight,
+  ChevronLeft,
+  Plus,
+  Home, 
+  Download, 
+  Calendar, 
+  Clock, 
+  Search,
+  Video,
+  Copy,
+  Radio,
+  UserCheck,
+  Check,
+  X,
+  AlertTriangle,
+  Camera,
+  LogOut,
+  Bell,
+  Phone,
+  Award,
+  Sparkles,
+  Filter,
+  ArrowUpRight,
+  User,
+  CreditCard,
+  FileText,
+  QrCode,
+  ShieldCheck,
+} from 'lucide-react';
+import { TeamMeeting, TeamMember } from '../types';
+import { RejectedLeaveBanner } from '../components/common/RejectedLeaveBanner';
+import { Employee360ProfileView } from './Employee360ProfileView';
+import { ProfileSelfServiceView } from './ProfileSelfServiceView';
+import { EmployeeAvatar } from '../components/common/EmployeeAvatar';
+import { MeetingTimePicker } from '../components/common/MeetingTimePicker';
+import { TopPerformersShowcase } from '../components/common/TopPerformersShowcase';
+import { scrollToTop } from '../utils/scrollUtils';
+
+export const TeamLeaderDashboardView: React.FC = () => {
+  const { 
+    currentUser,
+    profile,
+    teamMembers, 
+    teamGroups,
+    teamMeetings,
+    leaveRequests, 
+    assignedLeads,
+    approveLeaveRequest, 
+    rejectLeaveRequest,
+    scheduleTeamMeeting,
+    deleteTeamMeeting,
+    joinMeeting,
+    attendanceLogs,
+    setIsLeaveModalOpen,
+    openPunchIn,
+    openPunchOut,
+    triggerToast,
+    logout,
+    setIsNotificationDrawerOpen,
+    unreadNotificationCount,
+    companyHolidays,
+    weeklyOffDays,
+    calendarSettings,
+    callLogs,
+    paymentVerifications,
+    openCallModalForLead,
+    setIsIdCardModalOpen,
+    setSelectedIdCardEmpId,
+    openOfferLetterModal,
+    openPayslipModal,
+    openExperienceCertModal,
+    openRelievingLetterModal,
+    offerLetters,
+    experienceCerts,
+    relievingLetters,
+    myPayslips,
+    activeTab: globalActiveTab,
+    setActiveTab: setGlobalActiveTab,
+  } = useApp();
+
+  useScreenData('teamLeaderDashboard');
+
+  const leaderName = currentUser?.name || profile?.name || 'Team Leader';
+  const leaderFirstName = leaderName.trim().split(' ')[0] || 'Leader';
+  const leaderInitials = leaderName
+    ? leaderName
+        .trim()
+        .split(' ')
+        .filter(Boolean)
+        .map((w) => w[0])
+        .join('')
+        .slice(0, 2)
+        .toUpperCase()
+    : 'TL';
+
+  // Dispute state derived from profile and attendanceLogs
+  const todayStr = getTodayDateIST();
+  const todayDate = new Date();
+  const empId = currentUser?.employeeId || currentUser?.id || profile?.id;
+  const todayAttendance = attendanceLogs?.find(
+    (a) => a.date === todayStr && (a.employeeId === empId || a.employeeId === currentUser?.empCode || a.id?.includes(empId || '') || (a.employeeName && profile?.name && a.employeeName.toLowerCase() === profile.name.toLowerCase()))
+  );
+  const isAttendanceDisputed = Boolean(profile?.disputedByAdmin) || Boolean(todayAttendance?.disputedByAdmin);
+  const attendanceDisputeReason = profile?.disputeReason || todayAttendance?.disputeReason || 'Your punch-in photo was flagged as suspicious.';
+  const isPunchedInToday = !isAttendanceDisputed && (
+    profile.faceIdStatus === 'VERIFIED_PRESENT' ||
+    Boolean(todayAttendance?.checkIn && !todayAttendance?.checkOut)
+  );
+  const punchInTimeDisplay = isAttendanceDisputed ? '' : (profile?.checkInTime || todayAttendance?.checkIn || '');
+
+  type TLTab = 'home' | 'team' | 'calling' | 'leaves' | 'reports' | 'meetings' | 'profile';
+
+  const [activeTab, setActiveTabState] = useState<TLTab>(() => {
+    try {
+      const stored = localStorage.getItem('tnx_tlTab');
+      if (stored && ['home', 'team', 'calling', 'leaves', 'reports', 'meetings', 'profile'].includes(stored)) {
+        return stored as TLTab;
+      }
+      return 'home';
+    } catch {
+      return 'home';
+    }
+  });
+
+  // Sync with global active tab if triggered from header or other components
+  useEffect(() => {
+    if (globalActiveTab && ['home', 'team', 'calling', 'leaves', 'reports', 'meetings', 'profile'].includes(globalActiveTab)) {
+      setActiveTabState(globalActiveTab as TLTab);
+    }
+  }, [globalActiveTab]);
+
+  // Scroll to top on Leader tab switch
+  useEffect(() => {
+    scrollToTop();
+  }, [activeTab]);
+
+  const setActiveTab = (newTab: TLTab) => {
+    setActiveTabState(newTab);
+    if (setGlobalActiveTab) {
+      setGlobalActiveTab(newTab as any);
+    }
+    scrollToTop();
+    try {
+      localStorage.setItem('tnx_tlTab', newTab);
+    } catch {}
+  };
+
+  // Team Leader official documents
+  const myOfferLetter = offerLetters.find(o => 
+    (o.candidateName && o.candidateName.toLowerCase() === (profile.name || '').toLowerCase()) ||
+    (o.candidateEmail && o.candidateEmail.toLowerCase() === (profile.email || '').toLowerCase()) ||
+    (currentUser?.name && o.candidateName && o.candidateName.toLowerCase() === currentUser.name.toLowerCase()) ||
+    (currentUser?.email && o.candidateEmail && o.candidateEmail.toLowerCase() === currentUser.email.toLowerCase())
+  );
+
+  const myExpCert = experienceCerts.find(c =>
+    (c.employeeId && (c.employeeId === profile.id || c.employeeId === currentUser?.id || c.employeeId === currentUser?.employeeId)) ||
+    (c.empCode && profile.empCode && c.empCode.toLowerCase() === profile.empCode.toLowerCase()) ||
+    (c.employeeName && profile.name && c.employeeName.toLowerCase() === profile.name.toLowerCase())
+  );
+
+  const myRelLetter = relievingLetters.find(r =>
+    (r.empCode && profile.empCode && r.empCode.toLowerCase() === profile.empCode.toLowerCase()) ||
+    (r.employeeName && profile.name && r.employeeName.toLowerCase() === profile.name.toLowerCase())
+  );
+
+  const latestPayslip = myPayslips?.[0] || null;
+
+  const handleOpenMyIdCard = () => {
+    const myId = currentUser?.employeeId || currentUser?.id || profile.id || profile.empCode || '';
+    setSelectedIdCardEmpId(myId);
+    setIsIdCardModalOpen(true);
+  };
+
+  const handleDownloadMyIdCard = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      triggerToast(`⏳ Generating & downloading official ID Card PDF for ${profile.name || leaderName}...`);
+      await api.downloadIdCard(
+        { id: profile.id || currentUser?.id, email: profile.email || currentUser?.email },
+        {
+          name: profile.name || leaderName,
+          role: profile.roleTitle || 'Team Leader',
+          empCode: profile.empCode || currentUser?.empCode || 'TNX-001',
+          bloodGroup: profile.bloodGroup || 'O+ ve',
+          dob: (profile as any).dob || '05/11/1997',
+          empType: 'Full - Time',
+          phone: profile.phone || currentUser?.phone || '',
+          avatar: profile.avatar,
+          address: 'RR westbrook, 6th main HSR layout, beside pizza artistry, Bengaluru 102',
+          email: 'hr@tradenexustradesmart.in',
+          website: 'tradenexustradesmart.co.in',
+          companyPhone: '+919483001083',
+          signatoryName: 'T. Vidhya Sagar',
+          signatoryRole: 'Chief Executive Officer',
+        }
+      );
+      triggerToast(`✓ Official ID Card PDF downloaded successfully!`);
+    } catch (err: any) {
+      triggerToast(`⚠️ Download failed: ${err.message || 'Server error'}`);
+    }
+  };
+  const [callingSearchQuery, setCallingSearchQuery] = useState('');
+  const [callingVisibleLimit, setCallingVisibleLimit] = useState(30);
+  const [callingStatusFilter, setCallingStatusFilter] = useState<string>('ALL');
+  const [leaveSubTab, setLeaveSubTab] = useState<'approvals' | 'calendar'>('approvals');
+  const [calendarMonthOffset, setCalendarMonthOffset] = useState(0);
+  const [approvalsFilter, setApprovalsFilter] = useState<'PENDING' | 'APPROVED' | 'REJECTED'>('PENDING');
+  const [attendanceFilter, setAttendanceFilter] = useState<'ALL' | 'PRESENT' | 'LATE' | 'ON_LEAVE'>('ALL');
+  const [selectedRosterDate, setSelectedRosterDate] = useState<string>(() => getTodayDateIST());
+  const [reportsTimeframe, setReportsTimeframe] = useState<'today' | 'week' | 'month' | 'custom'>('today');
+  const [reportsFrom, setReportsFrom] = useState<string>(() => getTodayDateIST());
+  const [reportsTo, setReportsTo] = useState<string>(() => getTodayDateIST());
+  const [searchQuery, setSearchQuery] = useState('');
+  
+  // Selected member for 360 profile
+  const [selectedMemberFor360, setSelectedMemberFor360] = useState<TeamMember | null>(null);
+
+  // Meeting modal state
+  const [isMeetingModalOpen, setIsMeetingModalOpen] = useState(false);
+  const [meetingTitle, setMeetingTitle] = useState('');
+  const [meetingType, setMeetingType] = useState<string>('Team Discussion');
+  const [meetingTime, setMeetingTime] = useState('Today • 04:30 PM');
+  const [meetingLocation, setMeetingLocation] = useState('In-App Video Room');
+  const [meetingAgenda, setMeetingAgenda] = useState('');
+  const [selectedSquadMemberId, setSelectedSquadMemberId] = useState<string>(teamMembers[0]?.id || '');
+  const [tlIncludeAdmin, setTlIncludeAdmin] = useState<boolean>(true);
+
+  // Rejection modal state
+  const [rejectingLeaveId, setRejectingLeaveId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
+
+  // Squad identification: Determine the team(s) led by this Team Leader
+  const leaderNameLower = (currentUser?.name || profile?.name || '').trim().toLowerCase();
+  const leaderEmpCode = (currentUser?.empCode || profile?.empCode || '').trim();
+  const leaderId = currentUser?.employeeId || currentUser?.id || profile?.id;
+
+  const mySquadGroups = useMemo(() => {
+    const groups = new Set<string>();
+    (teamGroups || []).forEach(g => {
+      if (g.leaderName && g.leaderName.trim().toLowerCase() === leaderNameLower) {
+        groups.add(g.name.toLowerCase());
+      }
+    });
+    if (profile?.teamName) groups.add(profile.teamName.toLowerCase());
+    if ((profile as any)?.team) groups.add(String((profile as any).team).toLowerCase());
+    if ((currentUser as any)?.group) groups.add(String((currentUser as any).group).toLowerCase());
+    if ((currentUser as any)?.groupName) groups.add(String((currentUser as any).groupName).toLowerCase());
+    return groups;
+  }, [teamGroups, leaderNameLower, profile, currentUser]);
+
+  const isSquadMember = (memOrEmpCode?: string, memName?: string, memTeam?: string) => {
+    if (memTeam && mySquadGroups.has(memTeam.toLowerCase())) return true;
+    if (memOrEmpCode) {
+      const found = teamMembers.find(m => m.id === memOrEmpCode || m.empCode === memOrEmpCode);
+      if (found?.group && mySquadGroups.has(found.group.toLowerCase())) return true;
+    }
+    if (memName) {
+      const found = teamMembers.find(m => m.name.toLowerCase() === memName.toLowerCase());
+      if (found?.group && mySquadGroups.has(found.group.toLowerCase())) return true;
+    }
+    // If no groups found, allow if not the leader themselves
+    if (mySquadGroups.size === 0) return true;
+    return false;
+  };
+
+  const mySquadMembers = useMemo(() => {
+    if (mySquadGroups.size === 0) return teamMembers;
+    return teamMembers.filter(m => isSquadMember(m.id || m.empCode, m.name, m.group));
+  }, [teamMembers, mySquadGroups]);
+
+  // Dynamic Live Computations from Active Squad State
+  const totalTeamStrength = mySquadMembers.length;
+
+  const squadAttendanceCounts = useMemo(() => {
+    let present = 0;
+    let late = 0;
+    let onLeave = 0;
+    mySquadMembers.forEach(m => {
+      const ev = evaluateMemberAttendanceForDate(
+        m,
+        selectedRosterDate,
+        attendanceLogs,
+        leaveRequests,
+        calendarSettings,
+        weeklyOffDays,
+        companyHolidays
+      );
+      if (ev.status === 'PRESENT') present++;
+      if (ev.status === 'LATE') late++;
+      if (ev.status === 'ON_LEAVE') onLeave++;
+    });
+    return { present, late, onLeave, total: mySquadMembers.length };
+  }, [mySquadMembers, selectedRosterDate, attendanceLogs, leaveRequests, calendarSettings, weeklyOffDays, companyHolidays]);
+
+  const presentCount = squadAttendanceCounts.present + squadAttendanceCounts.late;
+  const lateCount = squadAttendanceCounts.late;
+  const onLeaveCount = squadAttendanceCounts.onLeave;
+
+  // Memoized single-pass squad performance aggregation
+  const { totalActivities, totalGoalCalls, totalConnectedCalls, connectRate, totalSales, targetTotal, targetPercentage } = useMemo(() => {
+    let activities = 0;
+    let goal = 0;
+    let connected = 0;
+    let sales = 0;
+    let target = 0;
+
+    for (let i = 0; i < mySquadMembers.length; i++) {
+      const m = mySquadMembers[i];
+      activities += (m.dialsToday || 0);
+      goal += (m.goalCalls || 0);
+      connected += (m.connected || 0);
+      sales += (m.salesAchieved || 0);
+      target += (m.salesTarget || 0);
+    }
+
+    const cRate = activities > 0 ? Math.round((connected / activities) * 100) : 0;
+    const tPct = target > 0 ? Math.min(100, Math.round((sales / target) * 100)) : 0;
+
+    return {
+      totalActivities: activities,
+      totalGoalCalls: goal,
+      totalConnectedCalls: connected,
+      connectRate: cRate,
+      totalSales: sales,
+      targetTotal: target,
+      targetPercentage: tPct,
+    };
+  }, [mySquadMembers]);
+
+  const todayYMD = getTodayDateIST();
+  const squadMemberNames = useMemo(() => new Set(mySquadMembers.map(m => (m.name || '').trim().toLowerCase())), [mySquadMembers]);
+  
+  const squadTodayVerifiedPayments = useMemo(() => {
+    return (paymentVerifications || []).filter(p => {
+      const matchDate = (p.timestamp || '').slice(0, 10) === todayYMD;
+      const isVerified = p.status === 'VERIFIED';
+      const isSquad = squadMemberNames.has((p.telecallerName || '').trim().toLowerCase());
+      return matchDate && isVerified && isSquad;
+    });
+  }, [paymentVerifications, todayYMD, squadMemberNames]);
+
+  const squadTodayRevenue = useMemo(() => {
+    return squadTodayVerifiedPayments.reduce((sum, p) => sum + (p.dealAmount || 0), 0);
+  }, [squadTodayVerifiedPayments]);
+
+  const totalWonToday = useMemo(() => {
+    return squadTodayVerifiedPayments.length;
+  }, [squadTodayVerifiedPayments]);
+
+  // TL's own allocated leads & personal closer metrics
+  const myAssignedLeads = useMemo(() => {
+    const validIds = new Set(
+      [currentUser?.id, currentUser?.employeeId, currentUser?.empCode, profile?.id, profile?.empCode]
+        .filter(Boolean)
+    );
+    const validName = (currentUser?.name || profile?.name || '').trim().toLowerCase();
+
+    return (assignedLeads || []).filter((l) => {
+      const matchesId = validIds.has(l.assignedToEmployeeId);
+      const matchesName = Boolean(validName && l.assignedToEmployeeName && l.assignedToEmployeeName.toLowerCase() === validName);
+      return matchesId || matchesName;
+    });
+  }, [assignedLeads, currentUser, profile]);
+
+  // Precomputed O(1) filter pill counts (prevents UI freeze when switching to Calling tab)
+  const callingCounts = useMemo(() => {
+    let fresh = 0;
+    let interested = 0;
+    let callback = 0;
+    let won = 0;
+    let busy = 0;
+    let notInterested = 0;
+
+    for (let i = 0; i < myAssignedLeads.length; i++) {
+      const l = myAssignedLeads[i];
+      if ((l.callCount || 0) === 0 && l.status !== 'CONVERTED') fresh++;
+      if (l.status === 'INTERESTED') interested++;
+      else if (l.status === 'CALLBACK') callback++;
+      else if (l.status === 'CONVERTED') won++;
+      else if (l.status === 'BUSY') busy++;
+      else if (l.status === 'NOT_INTERESTED') notInterested++;
+    }
+
+    return {
+      all: myAssignedLeads.length,
+      fresh,
+      interested,
+      callback,
+      won,
+      busy,
+      notInterested,
+    };
+  }, [myAssignedLeads]);
+
+  // Memoized filtered leads list (prevents recalculation on irrelevant renders)
+  const filteredCallingLeads = useMemo(() => {
+    const q = callingSearchQuery.trim().toLowerCase();
+    return myAssignedLeads.filter((l) => {
+      const matchesQ =
+        !q ||
+        (l.name && l.name.toLowerCase().includes(q)) ||
+        (l.phone && l.phone.includes(q)) ||
+        (l.company && l.company.toLowerCase().includes(q)) ||
+        (l.city && l.city.toLowerCase().includes(q));
+
+      const matchesStatus =
+        callingStatusFilter === 'ALL'
+          ? true
+          : callingStatusFilter === 'FRESH'
+          ? (l.callCount || 0) === 0 && l.status !== 'CONVERTED'
+          : l.status === callingStatusFilter;
+
+      return matchesQ && matchesStatus;
+    });
+  }, [myAssignedLeads, callingSearchQuery, callingStatusFilter]);
+
+  const myFreshLeadsCount = useMemo(() => {
+    return myAssignedLeads.filter((l) => (l.callCount || 0) === 0 && l.status !== 'CONVERTED').length;
+  }, [myAssignedLeads]);
+
+  const myDialsToday = useMemo(() => {
+    const validIds = new Set(
+      [currentUser?.id, currentUser?.employeeId, currentUser?.empCode, profile?.id, profile?.empCode]
+        .filter(Boolean)
+    );
+    const validName = (currentUser?.name || profile?.name || '').trim().toLowerCase();
+    return (callLogs || []).filter((c) => {
+      const isToday = c.date === todayStr || (c.timestamp && c.timestamp.startsWith(todayStr)) || (c.createdAt && c.createdAt.startsWith(todayStr));
+      const isMine = validIds.has(c.employeeId) || (validName && c.employeeName && c.employeeName.toLowerCase() === validName);
+      return isToday && isMine;
+    }).length;
+  }, [callLogs, todayStr, currentUser, profile]);
+
+  const myPayments = useMemo(() => {
+    return (paymentVerifications || []).filter((p) =>
+      paymentBelongsTo(p, currentUser?.name || profile?.name)
+    );
+  }, [paymentVerifications, currentUser, profile]);
+
+  const myWonDealsCount = useMemo(() => {
+    const wonFromLeads = myAssignedLeads.filter((l) => l.status === 'CONVERTED').length;
+    const wonFromPayments = myPayments.filter((p) => p.status === 'VERIFIED').length;
+    return Math.max(wonFromLeads, wonFromPayments);
+  }, [myAssignedLeads, myPayments]);
+
+  const myVerifiedRevenue = useMemo(() => {
+    return myPayments
+      .filter((p) => p.status === 'VERIFIED')
+      .reduce((sum, p) => sum + (p.dealAmount || 0), 0);
+  }, [myPayments]);
+
+  // Leaves visible to this TL: leaves belonging strictly to their squad members (excluding the TL themselves)
+  const squadLeaveRequests = useMemo(() => {
+    return leaveRequests.filter(req => {
+      const isSelf = req.employeeId === leaderId || req.employeeCode === leaderEmpCode || (req.employeeName && req.employeeName.toLowerCase() === leaderNameLower);
+      if (isSelf) return false;
+      return isSquadMember(req.employeeId || req.employeeCode, req.employeeName, req.teamName);
+    });
+  }, [leaveRequests, mySquadGroups, leaderId, leaderEmpCode, leaderNameLower, teamMembers]);
+
+  // Team Leader only sees squad leaves pending at their stage
+  const pendingLeaves = useMemo(() => {
+    return squadLeaveRequests.filter(r => r.approvalStage === 'PENDING_TEAM_LEADER' || (!r.approvalStage && r.status === 'PENDING'));
+  }, [squadLeaveRequests]);
+
+  // Calendar calculations driven by attendanceLogs
+  const monthAnchor = useMemo(() => {
+    const base = new Date(todayDate.getFullYear(), todayDate.getMonth() + calendarMonthOffset, 1);
+    return base;
+  }, [calendarMonthOffset]);
+
+  const calYear  = monthAnchor.getFullYear();
+  const calMonth = monthAnchor.getMonth();
+  const monthLabel = monthAnchor.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+  const leadingBlanks = new Date(calYear, calMonth, 1).getDay();
+  const statusByDay = useMemo(() => new Map<number, string>(
+    attendanceLogs
+      .filter(l => {
+        const d = new Date(l.date + 'T00:00:00');
+        return d.getFullYear() === calYear && d.getMonth() === calMonth;
+      })
+      .map(l => [new Date(l.date + 'T00:00:00').getDate(), l.status])
+  ), [attendanceLogs, calYear, calMonth]);
+
+  const countOf = (status: string) => attendanceLogs.filter((l) => l.status === status).length;
+  const presentDays = countOf('PRESENT') + countOf('HALF_DAY');
+  const leaveDays = countOf('LEAVE');
+  const absentDays = countOf('ABSENT');
+  const holidayDays = countOf('HOLIDAY');
+
+  // Format amount in Lakhs
+  const formatInLakhs = (amount: number) => {
+    if (amount >= 100000) {
+      const lakhs = (amount / 100000).toFixed(2);
+      return `₹${lakhs.replace(/\.00$/, '')} L`;
+    }
+    return `₹${amount.toLocaleString('en-IN')}`;
+  };
+
+  // Performance Reports driven by timeframe selection ('today' | 'week' | 'month' | 'custom')
+  const { tfDials, tfSales, tfTarget, tfTargetPercent, tfConnectRate, membersByDials, tfDailyBreakdown, tfRange } = useMemo(() => {
+    const mode = reportsTimeframe === 'today'
+      ? 'TODAY'
+      : reportsTimeframe === 'week'
+      ? 'THIS_WEEK'
+      : reportsTimeframe === 'month'
+      ? 'THIS_MONTH'
+      : 'CUSTOM';
+    // Keep custom range ordered even if the user picks "to" before "from"
+    const from = reportsFrom <= reportsTo ? reportsFrom : reportsTo;
+    const to = reportsFrom <= reportsTo ? reportsTo : reportsFrom;
+    const range = getDateRangeIST(mode as any, from, to);
+
+    const isMatchTimeframe = (dateStr?: string) => {
+      if (!dateStr) return false;
+      return isDateInPeriodIST(dateStr, mode as any, from, to);
+    };
+
+    // Filter actual call logs matching timeframe
+    const filteredCalls = (callLogs || []).filter(c => isMatchTimeframe(c.date || c.createdAt));
+
+    // Verified payments matching timeframe — the single revenue source of truth
+    // (same as Admin/HR). Uses the real payment date, never a "Just now" label.
+    const verifiedPayments = (paymentVerifications || []).filter(
+      p => p.status === 'VERIFIED' && isPaymentInPeriod(p, mode as any, from, to)
+    );
+
+    const ranking = [...teamMembers].map(m => {
+      // Find calls logged for this employee in timeframe
+      const empCalls = filteredCalls.filter(c =>
+        c.employeeId === m.id || c.employeeId === m.empCode || (c.employeeName && c.employeeName.toLowerCase() === m.name.toLowerCase())
+      ).length;
+      
+      // If timeframe is today and no granular call logs found, fall back to m.dialsToday
+      const callerDials = reportsTimeframe === 'today'
+        ? (empCalls > 0 ? empCalls : (m.dialsToday || 0))
+        : empCalls;
+
+      // Authentic sales for this caller in timeframe = their verified payments only
+      const empPayments = verifiedPayments.filter(p => paymentBelongsTo(p, m.name));
+      const callerSales = empPayments.reduce((s, p) => s + (Number(p.dealAmount) || 0), 0);
+
+      return {
+        ...m,
+        callerDials,
+        callerSales,
+        callerDeals: empPayments.length,
+      };
+    }).sort((a, b) => b.callerSales - a.callerSales || b.callerDials - a.callerDials);
+
+    // Total dials aggregated across members or calls
+    const dials = ranking.reduce((sum, m) => sum + m.callerDials, 0);
+
+    // Total sales aggregated across members
+    const sales = ranking.reduce((sum, m) => sum + m.callerSales, 0);
+
+    // Day-wise revenue breakdown for the selected range (only days with activity)
+    const memberNames = new Set(teamMembers.map(m => (m.name || '').trim().toLowerCase()));
+    const byDay = new Map<string, { revenue: number; deals: number }>();
+    verifiedPayments
+      .filter(p => memberNames.has((p.telecallerName || '').trim().toLowerCase()))
+      .forEach(p => {
+        const d = getPaymentDateIST(p);
+        if (!d) return;
+        const cur = byDay.get(d) || { revenue: 0, deals: 0 };
+        cur.revenue += Number(p.dealAmount) || 0;
+        cur.deals += 1;
+        byDay.set(d, cur);
+      });
+    const daily = [...byDay.entries()]
+      .map(([date, v]) => ({ date, ...v }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+
+    // Target pacing: monthly total target, paced by the number of days in the range
+    const dayCount = Math.max(
+      1,
+      Math.round((new Date(`${range.end}T00:00:00`).getTime() - new Date(`${range.start}T00:00:00`).getTime()) / 86400000) + 1
+    );
+    const target = reportsTimeframe === 'today'
+      ? Math.round(targetTotal / 22)
+      : reportsTimeframe === 'week'
+      ? Math.round(targetTotal / 4)
+      : reportsTimeframe === 'month'
+      ? targetTotal
+      : Math.round((targetTotal / 30) * dayCount);
+
+    const targetPct = target > 0 ? Math.min(100, Math.round((sales / target) * 100)) : 0;
+    
+    // Connected calls rate
+    const connectedCount = filteredCalls.filter(c => c.outcome === 'CONNECTED' || c.outcome === 'INTERESTED').length;
+    const connRate = dials > 0 
+      ? Math.round((connectedCount / dials) * 100) 
+      : (reportsTimeframe === 'today' ? connectRate : 0);
+
+    return {
+      tfDials: dials,
+      tfSales: sales,
+      tfTarget: target,
+      tfTargetPercent: targetPct,
+      tfConnectRate: connRate,
+      membersByDials: ranking,
+      tfDailyBreakdown: daily,
+      tfRange: range,
+    };
+  }, [reportsTimeframe, reportsFrom, reportsTo, callLogs, paymentVerifications, targetTotal, connectRate, teamMembers]);
+
+  const reportsPeriodLabel = reportsTimeframe === 'today'
+    ? 'Today'
+    : reportsTimeframe === 'week'
+    ? 'Last 7 Days'
+    : reportsTimeframe === 'month'
+    ? 'This Month'
+    : tfRange.start === tfRange.end
+    ? tfRange.start
+    : `${tfRange.start} → ${tfRange.end}`;
+
+  // Top active telecallers on floor right now from active SQLite team_members
+  const activeFloorMembers = useMemo(() => {
+    return [...teamMembers]
+      .filter(m => m.active !== 0)
+      .sort((a, b) => {
+        if (a.attendanceStatus === 'PRESENT' && b.attendanceStatus !== 'PRESENT') return -1;
+        if (b.attendanceStatus === 'PRESENT' && a.attendanceStatus !== 'PRESENT') return 1;
+        if (b.salesAchieved !== a.salesAchieved) return b.salesAchieved - a.salesAchieved;
+        return b.dialsToday - a.dialsToday;
+      })
+      .slice(0, 3);
+  }, [teamMembers]);
+
+  // Real-time backend-backed working leads pulse from SQLite assigned_leads
+  const liveFloorLeads = useMemo(() => {
+    const activeLeads = (assignedLeads || []).filter(l => l.status !== 'PENDING' || l.callCount > 0);
+    const sorted = [...activeLeads].sort((a, b) => {
+      const aVal = a.dealValue || 0;
+      const bVal = b.dealValue || 0;
+      return bVal - aVal;
+    });
+
+    if (sorted.length > 0) {
+      return sorted.slice(0, 4).map((lead, idx) => {
+        let type = 'CONNECTED';
+        const s = (lead.status || '').toUpperCase();
+        if (s === 'CONVERTED' || (lead.dealValue && lead.dealValue >= 75000)) {
+          type = 'WON_DEAL';
+        } else if (s === 'INTERESTED') {
+          type = 'INTERESTED';
+        } else if (s === 'CALLBACK') {
+          type = 'CALLBACK';
+        }
+
+        const relativeTimes = ['12m ago', '26m ago', '42m ago', '1h ago', '2h ago'];
+        const amountStr = lead.dealValue && lead.dealValue > 0
+          ? formatInLakhs(lead.dealValue)
+          : '—';
+
+        return {
+          id: lead.id,
+          rep: lead.assignedToEmployeeName || 'Employee',
+          client: lead.company || 'Enterprise Client',
+          contact: lead.name,
+          type,
+          amount: amountStr,
+          time: lead.lastCallTimestamp || relativeTimes[idx % relativeTimes.length],
+          note: lead.notes || 'Spoke with client, follow-up scheduled.'
+        };
+      });
+    }
+
+    return [];
+  }, [assignedLeads]);
+
+  const handleCreateMeetingSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!meetingTitle.trim()) return;
+
+    const is1on1 = meetingType === '1-on-1 Call';
+    const targetMember = teamMembers.find(m => m.id === selectedSquadMemberId);
+    const userSquad = profile?.teamName || teamMembers[0]?.group || 'My Squad';
+
+    await scheduleTeamMeeting({
+      title: meetingTitle.trim(),
+      type: meetingType,
+      dateTime: meetingTime,
+      location: 'In-App Video Room',
+      agenda: meetingAgenda || `Squad meeting for ${is1on1 ? (targetMember?.name || 'squad member') : userSquad}.`,
+      targetAudience: is1on1 ? 'INDIVIDUAL' : 'SQUAD',
+      targetTeam: userSquad,
+      targetEmployeeId: is1on1 ? selectedSquadMemberId : undefined,
+      invitedMemberName: is1on1 ? targetMember?.name : undefined,
+      attendeesCount: is1on1 ? 2 : teamMembers.length + 1,
+      includeAdmin: tlIncludeAdmin,
+      createdByRole: 'team_leader',
+      priority: tlIncludeAdmin ? 'HIGH' : 'NORMAL',
+    });
+
+    setMeetingTitle('');
+    setMeetingAgenda('');
+    setIsMeetingModalOpen(false);
+  };
+
+  const startInstantMeeting = async (type: string = 'Team Discussion') => {
+    const userSquad = profile?.teamName || teamMembers[0]?.group || 'My Squad';
+    const mtg = await scheduleTeamMeeting({
+      title: `⚡ Live Squad Sync • ${userSquad}`,
+      dateTime: 'Live Now',
+      type,
+      location: 'In-App Video Room',
+      agenda: `Instant squad sprint and live review for ${userSquad}`,
+      status: 'LIVE',
+      targetAudience: 'SQUAD',
+      targetTeam: userSquad,
+      attendeesCount: teamMembers.length + 1,
+      includeAdmin: tlIncludeAdmin,
+      createdByRole: 'team_leader',
+    });
+    if (mtg) {
+      joinMeeting(mtg);
+    }
+  };
+
+  const copyMeetingLink = (link?: string) => {
+    if (!link) return;
+    navigator.clipboard.writeText(link);
+    triggerToast('✓ Meeting link copied to clipboard');
+  };
+
+  const filteredMembers = mySquadMembers.filter(m => {
+    const ev = evaluateMemberAttendanceForDate(
+      m,
+      selectedRosterDate,
+      attendanceLogs,
+      leaveRequests,
+      calendarSettings,
+      weeklyOffDays,
+      companyHolidays
+    );
+    const matchesAttendance =
+      attendanceFilter === 'ALL'
+        ? true
+        : attendanceFilter === 'PRESENT'
+        ? (ev.status === 'PRESENT' || ev.status === 'LATE')
+        : attendanceFilter === 'LATE'
+        ? ev.status === 'LATE'
+        : attendanceFilter === 'ON_LEAVE'
+        ? ev.status === 'ON_LEAVE'
+        : ev.status === attendanceFilter;
+
+    const matchesSearch = !searchQuery.trim() || 
+      m.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+      m.empCode.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (ev.leave?.leaveType && ev.leave.leaveType.toLowerCase().includes(searchQuery.toLowerCase())) ||
+      (ev.leave?.reason && ev.leave.reason.toLowerCase().includes(searchQuery.toLowerCase()));
+    return matchesAttendance && matchesSearch;
+  });
+
+  const exportTeamReportCSV = () => {
+    const csvContent = "data:text/csv;charset=utf-8," 
+      + `Period,${reportsPeriodLabel}\n`
+      + "Name,Role,Group,Attendance,Check-in,Dials (period),Verified Deals (period),Verified Revenue (period),Monthly Target\n"
+      + membersByDials.map((e: any) => `"${e.name}","${e.role}","${e.group}","${e.attendanceStatus}","${e.checkInTime || 'N/A'}",${e.callerDials},${e.callerDeals},${e.callerSales},${e.salesTarget}`).join("\n")
+      + "\n\nDate,Verified Revenue,Verified Deals\n"
+      + tfDailyBreakdown.map(d => `${d.date},${d.revenue},${d.deals}`).join("\n");
+    
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `Team_Performance_Report_${tfRange.start}_to_${tfRange.end}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    triggerToast('✓ Exported Team Performance Report (CSV)');
+  };
+
+  // Show both LIVE and upcoming scheduled meetings so leaders & reps can see the time and join (deduplicated)
+  const activeMeetings = useMemo(() => {
+    const raw = teamMeetings.filter(m => m.status === 'LIVE' || m.status === 'UPCOMING');
+    const seen = new Set<string>();
+    return raw.filter(m => {
+      const key = m.id || `${(m.title || '').trim().toLowerCase()}_${(m.dateTime || '').trim().toLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [teamMeetings]);
+
+  // If 360 profile is open, render native full-screen mobile view
+  if (selectedMemberFor360) {
+    return (
+      <div className="min-h-screen bg-[#F8FAFC] pb-28 w-full max-w-5xl mx-auto">
+        <Employee360ProfileView 
+          member={selectedMemberFor360} 
+          onBack={() => setSelectedMemberFor360(null)} 
+          viewerRole="team_leader" 
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-800 flex flex-col justify-between w-full max-w-5xl mx-auto font-sans pb-28 lg:pb-32 selection:bg-[#00C9A7]/20">
+      
+      {/* Main Scrollable Content Area */}
+      <main className="flex-1 p-3.5 sm:p-6 lg:p-8 space-y-4 pt-2">
+        
+        {/* Rejected Leave Escalation Banner */}
+        <RejectedLeaveBanner className="mb-2" />
+
+        {/* --- TAB 1: HOME (Mobile Dashboard) --- */}
+        {activeTab === 'home' && (
+          <div className="space-y-4 animate-in fade-in duration-150">
+            
+            {/* Greeting Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="font-display font-black text-2xl text-[#0A2540] tracking-tight">
+                    Hello, {leaderFirstName}
+                  </h2>
+                  <span className="text-xl">👋</span>
+                </div>
+                <p className="text-xs font-semibold text-slate-500 mt-0.5">
+                  Team Leader • <span className="text-[#00A88B] font-bold">{currentUser?.groupName || profile?.teamName || 'Assigned Squad'}</span>
+                </p>
+              </div>
+            </div>
+
+            {/* 3 Top Attendance Metric Cards */}
+            <div className="grid grid-cols-3 gap-2.5">
+              
+              {/* Card 1: Team Members */}
+              <div 
+                onClick={() => setActiveTab('team')}
+                className="bg-white border border-slate-200 rounded-2xl p-3 shadow-xs flex flex-col justify-between cursor-pointer hover:border-[#00C9A7] transition-all active:scale-95"
+              >
+                <span className="text-[11px] font-bold text-slate-500 leading-tight mb-1">
+                  Team Size
+                </span>
+                <span className="font-display font-black text-2xl text-[#0A2540]">
+                  {totalTeamStrength}
+                </span>
+              </div>
+
+              {/* Card 2: Present Today */}
+              <div 
+                onClick={() => { setAttendanceFilter('PRESENT'); setActiveTab('team'); }}
+                className="bg-white border border-emerald-200/80 rounded-2xl p-3 shadow-xs flex flex-col justify-between cursor-pointer hover:border-emerald-500 transition-all active:scale-95"
+              >
+                <span className="text-[11px] font-bold text-emerald-700 leading-tight mb-1">
+                  Present Today
+                </span>
+                <span className="font-display font-black text-2xl text-emerald-600">
+                  {presentCount}
+                </span>
+              </div>
+
+              {/* Card 3: On Leave */}
+              <div 
+                onClick={() => setActiveTab('leaves')}
+                className="bg-white border border-amber-200/80 rounded-2xl p-3 shadow-xs flex flex-col justify-between cursor-pointer hover:border-amber-500 transition-all active:scale-95"
+              >
+                <span className="text-[11px] font-bold text-amber-700 leading-tight mb-1">
+                  On Leave
+                </span>
+                <span className="font-display font-black text-2xl text-amber-600">
+                  {onLeaveCount}
+                </span>
+              </div>
+
+            </div>
+
+            {/* Active LIVE & Upcoming Zoom Meetings Banner */}
+            {activeMeetings.length > 0 && (
+              <div className="space-y-2">
+                {activeMeetings.map((mtg) => {
+                  const isLive = mtg.status === 'LIVE';
+                  return (
+                    <div 
+                      key={mtg.id} 
+                      className={`p-3.5 border-2 rounded-2xl flex items-center justify-between shadow-xs ${
+                        isLive 
+                          ? 'bg-emerald-50 border-emerald-400' 
+                          : 'bg-white border-blue-200'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="relative flex h-3 w-3 flex-shrink-0">
+                          {isLive ? (
+                            <>
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-600"></span>
+                            </>
+                          ) : (
+                            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500"></span>
+                          )}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase tracking-wider ${
+                              isLive ? 'bg-emerald-200 text-emerald-900' : 'bg-blue-100 text-blue-800'
+                            }`}>
+                              {isLive ? '🔴 Live Call' : '📅 Scheduled'}
+                            </span>
+                          </div>
+                          <strong className="text-xs font-bold text-[#0A2540] block truncate mt-0.5">{mtg.title}</strong>
+                          <span className="text-[10px] text-slate-500 font-medium block truncate">
+                            {mtg.dateTime ? `📅 ${mtg.dateTime} · ` : ''}{mtg.hostName || 'Floor Manager'}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => joinMeeting(mtg)}
+                        className={`px-3 py-1.5 font-black text-xs rounded-xl shadow-xs active:scale-95 flex-shrink-0 flex items-center gap-1 cursor-pointer ${
+                          isLive 
+                            ? 'bg-[#00C9A7] text-[#0A2540]' 
+                            : 'bg-[#0A2540] text-white'
+                        }`}
+                      >
+                        <Video className="w-3 h-3" />
+                        <span>{isLive ? 'Join Call' : 'Start / Join'}</span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Pending Leave Approvals Quick Action Card */}
+            {pendingLeaves.length > 0 && (
+              <div className="bg-amber-50/70 border-2 border-amber-300 rounded-2xl p-3.5 sm:p-4 space-y-3 shadow-xs animate-in slide-in-from-top-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-amber-500 text-white flex items-center justify-center font-black text-xs shadow-2xs">
+                      {pendingLeaves.length}
+                    </div>
+                    <div>
+                      <h4 className="font-display font-black text-xs text-amber-950 uppercase tracking-wider">
+                        Pending Leave Requests
+                      </h4>
+                      <span className="text-[10px] text-amber-800">1-click approve &amp; escalate to HR</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setActiveTab('leaves')}
+                    className="text-[11px] font-bold text-amber-900 hover:underline cursor-pointer"
+                  >
+                    View All →
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {pendingLeaves.slice(0, 3).map((req) => (
+                    <div key={req.id} className="bg-white p-3 rounded-xl border border-amber-200 shadow-2xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <strong className="text-xs font-bold text-[#0A2540] block">{req.employeeName || 'Squad Member'}</strong>
+                          <span className="text-[10px] text-slate-500">{req.leaveType} • {req.fromDate} to {req.toDate} ({req.totalDays || 1} day(s))</span>
+                        </div>
+                        <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300">
+                          PENDING
+                        </span>
+                      </div>
+                      {req.reason && (
+                        <p className="text-[11px] text-slate-600 italic bg-slate-50 p-2 rounded-lg border border-slate-100">
+                          "{req.reason}"
+                        </p>
+                      )}
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        <button
+                          onClick={() => {
+                            approveLeaveRequest(req.id);
+                            triggerToast(`✓ Approved & forwarded leave for ${req.employeeName || 'Member'} to HR`);
+                          }}
+                          className="py-2 rounded-xl bg-[#00C9A7] hover:bg-[#00B4D8] text-[#0A2540] font-black text-xs flex items-center justify-center gap-1 shadow-xs active:scale-95 transition-all cursor-pointer"
+                        >
+                          <Check className="w-3.5 h-3.5 stroke-[3]" />
+                          <span>Approve → HR</span>
+                        </button>
+                        <button
+                          onClick={() => setRejectingLeaveId(req.id)}
+                          className="py-2 rounded-xl bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-200 text-slate-600 hover:text-rose-600 font-bold text-xs flex items-center justify-center gap-1 active:scale-95 transition-all cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          <span>Reject</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ⚠️ Admin Dispute Banner — shown when admin flags TL's attendance */}
+            {isAttendanceDisputed && (
+              <div className="bg-rose-50 border-2 border-rose-400 rounded-3xl p-4 shadow-sm space-y-3 animate-in slide-in-from-top-2">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-rose-500 text-white flex items-center justify-center flex-shrink-0 shadow-sm mt-0.5">
+                    <AlertTriangle className="w-5 h-5 stroke-[2.5]" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-black uppercase tracking-wider text-rose-900">Attendance Flagged by Admin</span>
+                      <span className="text-[9px] font-black px-2 py-0.5 rounded-full bg-rose-200 text-rose-800">Punch In Required</span>
+                    </div>
+                    <p className="text-xs text-rose-700 font-semibold mt-1">
+                      Admin has flagged your punch-in as suspicious.
+                    </p>
+                    <div className="bg-white/90 border border-rose-200 rounded-xl px-3 py-2 mt-1.5 text-xs font-semibold text-rose-800 shadow-2xs">
+                      <span className="text-[10px] font-bold text-rose-400 uppercase tracking-wider block">Admin Reason:</span>
+                      "{attendanceDisputeReason}"
+                    </div>
+                    <p className="text-[11px] text-rose-600 mt-2 font-medium">
+                      Please punch in again with a clear face selfie so admin can verify your attendance.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={openPunchIn}
+                  className="w-full py-3 rounded-2xl bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-700 hover:to-rose-600 text-white font-black text-xs shadow-md shadow-rose-500/25 flex items-center justify-center gap-2 active:scale-95 transition-all cursor-pointer"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>Punch In Again (Clear Face Photo)</span>
+                </button>
+              </div>
+            )}
+
+            {/* Team Leader Attendance Punch Lifecycle Card */}
+            {!isAttendanceDisputed && (
+              <div className="bg-white border border-[#00C9A7]/40 shadow-xs rounded-2xl p-3.5 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[#00C9A7]/15 text-[#00A88B] flex items-center justify-center flex-shrink-0">
+                    <UserCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-display font-bold text-xs text-[#0A2540]">My Attendance (TL Punch)</h4>
+                    <p className="text-[10px] text-slate-500 font-mono">
+                      {isPunchedInToday && punchInTimeDisplay ? `Punched in: ${punchInTimeDisplay}` : 'Face scan required to check in'}
+                    </p>
+                  </div>
+                </div>
+
+                {isPunchedInToday ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      ✓ Present
+                    </span>
+                    <button
+                      type="button"
+                      onClick={openPunchOut}
+                      className="px-3 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs border border-rose-200 transition-all active:scale-95 cursor-pointer"
+                    >
+                      Punch Out
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={openPunchIn}
+                    className="px-3.5 py-1.5 rounded-xl bg-[#00C9A7] hover:bg-[#00B4D8] text-[#0A2540] font-black text-xs transition-all shadow-xs active:scale-95 cursor-pointer"
+                  >
+                    Punch In (Face ID)
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* 🏆 Monthly Top Sales Champions Showcase (Hall of Fame) */}
+            <TopPerformersShowcase />
+
+            {/* Team Overview Section (Today's Summary) */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="font-display font-bold text-sm text-[#0A2540]">
+                  Today's Floor Overview
+                </h3>
+                <button 
+                  onClick={() => setActiveTab('reports')}
+                  className="text-[11px] font-bold text-[#00A88B] hover:underline"
+                >
+                  View Reports →
+                </button>
+              </div>
+
+              {/* 3 Metric Columns Side-by-Side: Calls | Won | Revenue (Matching Image 2) */}
+              <div className="bg-white border border-slate-200/90 shadow-xs rounded-2xl p-3.5">
+                <div className="grid grid-cols-3 gap-1 text-center divide-x divide-slate-100">
+                  {/* 1. Calls */}
+                  <div 
+                    onClick={() => setActiveTab('team')} 
+                    className="px-1 cursor-pointer active:scale-95 transition-transform"
+                  >
+                    <strong className="text-base sm:text-lg font-display font-black text-[#0A2540] block leading-tight">
+                      <span className="text-[#00A88B]">{totalActivities}</span>
+                      <span className="text-slate-300 font-normal text-xs">/{totalGoalCalls}</span>
+                    </strong>
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-1">
+                      Calls
+                    </span>
+                  </div>
+
+                  {/* 2. Won */}
+                  <div 
+                    onClick={() => setActiveTab('team')} 
+                    className="px-1 cursor-pointer active:scale-95 transition-transform"
+                  >
+                    <strong className="text-base sm:text-lg font-display font-black text-purple-700 block leading-tight">
+                      {totalWonToday}
+                    </strong>
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-1">
+                      Won Deals
+                    </span>
+                  </div>
+
+                  {/* 3. Today's Revenue */}
+                  <div 
+                    onClick={() => setActiveTab('reports')} 
+                    className="px-1 cursor-pointer active:scale-95 transition-transform"
+                  >
+                    <strong className="text-base sm:text-lg font-display font-black text-[#00A88B] block leading-tight">
+                      {formatInLakhs(squadTodayRevenue)}
+                    </strong>
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-1">
+                      Today's Sales
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Team Leader Personal Closer Metrics Card */}
+              <div className="bg-gradient-to-br from-[#0A2540] to-[#0F3258] text-white border border-slate-800 shadow-md rounded-2xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-[#00C9A7]/20 border border-[#00C9A7]/40 flex items-center justify-center text-[#00C9A7]">
+                      <Award className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-display font-black text-xs text-white uppercase tracking-wider">
+                        My Personal Closer Stats
+                      </h4>
+                      <span className="text-[10px] text-slate-300">
+                        Leads dialed &amp; deals closed personally by you
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('calling')}
+                    className="flex items-center gap-1 bg-[#00C9A7] hover:bg-[#00B4D8] text-[#0A2540] font-black text-[11px] px-3 py-1.5 rounded-xl shadow-xs transition-all active:scale-95 cursor-pointer"
+                  >
+                    <PhoneCall className="w-3 h-3 stroke-[2.5]" />
+                    <span>Open Desk ({myAssignedLeads.length})</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 pt-1 border-t border-white/10 text-center">
+                  <div className="bg-white/5 rounded-xl p-2.5">
+                    <span className="text-[10px] text-slate-300 uppercase font-bold tracking-wider block">
+                      My Dials Today
+                    </span>
+                    <span className="font-display font-black text-lg text-[#00C9A7] block mt-0.5">
+                      {myDialsToday}
+                    </span>
+                  </div>
+                  <div className="bg-white/5 rounded-xl p-2.5">
+                    <span className="text-[10px] text-slate-300 uppercase font-bold tracking-wider block">
+                      My Won Deals
+                    </span>
+                    <span className="font-display font-black text-lg text-purple-300 block mt-0.5">
+                      {myWonDealsCount}
+                    </span>
+                  </div>
+                  <div className="bg-white/5 rounded-xl p-2.5">
+                    <span className="text-[10px] text-slate-300 uppercase font-bold tracking-wider block">
+                      My Revenue
+                    </span>
+                    <span className="font-display font-black text-lg text-emerald-300 block mt-0.5">
+                      {formatInLakhs(myVerifiedRevenue)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Team Performance Section (Radial Target Gauge) */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="font-display font-bold text-sm text-[#0A2540]">
+                  Monthly Sales Target
+                </h3>
+                <span className="text-[11px] font-bold text-[#00A88B] bg-[#E6FAF6] px-2.5 py-0.5 rounded-full">
+                  This Month
+                </span>
+              </div>
+
+              <div className="bg-white border border-slate-200 rounded-3xl p-4 shadow-sm flex items-center gap-4">
+                
+                {/* Circular Gauge */}
+                <div className="relative w-20 h-20 flex-shrink-0 flex items-center justify-center">
+                  <svg className="w-20 h-20 transform -rotate-90" viewBox="0 0 80 80">
+                    <circle
+                      cx="40"
+                      cy="40"
+                      r="32"
+                      className="stroke-slate-100"
+                      strokeWidth="7"
+                      fill="transparent"
+                    />
+                    <circle
+                      cx="40"
+                      cy="40"
+                      r="32"
+                      stroke="#00C9A7"
+                      strokeWidth="7"
+                      strokeDasharray="201"
+                      strokeDashoffset={201 - (201 * targetPercentage) / 100}
+                      strokeLinecap="round"
+                      fill="transparent"
+                      className="transition-all duration-1000 ease-out"
+                    />
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                    <span className="font-display font-black text-lg text-[#0A2540] leading-none">
+                      {targetPercentage}%
+                    </span>
+                  </div>
+                </div>
+
+                {/* Target Metric Breakdown */}
+                <div className="flex-1 min-w-0">
+                  <span className="text-xs font-bold text-slate-700 block mb-0.5">
+                    Target Achievement
+                  </span>
+                  <span className="text-[11px] text-slate-500 block">
+                    {formatInLakhs(totalSales)} of {formatInLakhs(targetTotal)}
+                  </span>
+                  <div className="w-full bg-slate-100 h-2 rounded-full mt-2 overflow-hidden">
+                    <div 
+                      className="bg-[#00C9A7] h-full rounded-full transition-all duration-500" 
+                      style={{ width: `${targetPercentage}%` }} 
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Quick Mobile Action Links */}
+            <div className="grid grid-cols-2 gap-2.5">
+              {/* Standup Card */}
+              <div 
+                onClick={() => setActiveTab('meetings')}
+                className="bg-white border border-slate-200 hover:border-[#00C9A7] rounded-2xl p-3 shadow-xs flex items-center justify-between cursor-pointer active:scale-95 transition-all"
+              >
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center flex-shrink-0">
+                    <Video className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-xs text-[#0A2540]">Meetings</h4>
+                    <span className="text-[10px] text-slate-400">Video Calls</span>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-slate-400" />
+              </div>
+
+              {/* Leave Requests Card */}
+              <div 
+                onClick={() => setActiveTab('leaves')}
+                className="bg-white border border-slate-200 hover:border-amber-400 rounded-2xl p-3 shadow-xs flex items-center justify-between cursor-pointer active:scale-95 transition-all"
+              >
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0">
+                    <CheckCircle2 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-xs text-[#0A2540]">Leaves</h4>
+                    <span className="text-[10px] text-slate-400">{pendingLeaves.length} Pending</span>
+                  </div>
+                </div>
+                {pendingLeaves.length > 0 && (
+                  <span className="w-5 h-5 rounded-full bg-amber-500 text-white font-black text-[10px] flex items-center justify-center">
+                    {pendingLeaves.length}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* --- SECTION 1: LIVE FLOOR ATTENDANCE SNAP --- */}
+            <div className="space-y-2.5 pt-2">
+              <div className="flex items-center justify-between px-0.5">
+                <div className="flex items-center gap-2">
+                  <h3 className="font-display font-black text-sm text-[#0A2540]">
+                    Live Floor Attendance
+                  </h3>
+                  <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    {presentCount} Active
+                  </span>
+                </div>
+                <button 
+                  onClick={() => setActiveTab('team')}
+                  className="text-[11px] font-bold text-[#00A88B] hover:text-[#0A2540] transition-colors flex items-center gap-0.5"
+                >
+                  <span>View All ({teamMembers.length})</span>
+                  <span>→</span>
+                </button>
+              </div>
+
+              {/* Top Active Telecallers on Floor Right Now - Backed by SQLite team_members */}
+              <div className="space-y-2">
+                {activeFloorMembers.map((m) => (
+                  <div 
+                    key={m.id}
+                    onClick={() => setSelectedMemberFor360(m)}
+                    className="bg-white border border-slate-200/90 hover:border-[#00C9A7] rounded-2xl p-3 shadow-2xs flex items-center justify-between cursor-pointer active:scale-[0.99] transition-all group"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <div className="relative flex-shrink-0">
+                        <div className="w-9 h-9 rounded-xl bg-[#0A2540] text-[#00C9A7] flex items-center justify-center font-bold text-xs group-hover:scale-105 transition-transform overflow-hidden">
+                          <EmployeeAvatar
+                            avatar={m.avatar}
+                            name={m.name}
+                            className="w-full h-full"
+                            fallbackClassName="font-bold text-xs"
+                          />
+                        </div>
+                        <span className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${
+                          m.attendanceStatus === 'PRESENT' ? 'bg-emerald-500' : 'bg-amber-500'
+                        }`} />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <strong className="text-xs font-bold text-[#0A2540] group-hover:text-[#00A88B] transition-colors">
+                            {m.name}
+                          </strong>
+                          <span className="text-[9px] font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.2 rounded border border-slate-200/60">
+                            {m.group}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          In: {m.checkInTime || '09:15 AM'} • {m.dialsToday} Dials
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="text-right flex-shrink-0">
+                      <span className="text-xs font-mono font-black text-[#00A88B] block">
+                        {formatInLakhs(m.salesAchieved)}
+                      </span>
+                      <span className="text-[9px] text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200/60 inline-block mt-0.5">
+                        {m.interested || 0} Int.
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* --- SECTION 2: LIVE FLOOR WORKING LEADS --- */}
+            <div className="space-y-2.5 pt-2 pb-2">
+              <div className="flex items-center justify-between px-0.5">
+                <div className="flex items-center gap-2">
+                  <h3 className="font-display font-black text-sm text-[#0A2540]">
+                    Floor Pulse: Active Leads
+                  </h3>
+                  <span className="text-[9px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200/80">
+                    Live Stream
+                  </span>
+                </div>
+                <span className="text-[10px] text-slate-400 font-mono">Today</span>
+              </div>
+
+              {/* Recent Live Working Leads Cards - Backed by SQLite assigned_leads */}
+              <div className="space-y-2">
+                {liveFloorLeads.map((item) => (
+                  <div 
+                    key={item.id}
+                    className="bg-white border border-slate-200/90 rounded-2xl p-3 shadow-2xs space-y-1.5 transition-all"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                          item.type === 'WON_DEAL' ? 'bg-purple-500' :
+                          item.type === 'INTERESTED' ? 'bg-emerald-500' :
+                          item.type === 'CALLBACK' ? 'bg-amber-500' : 'bg-sky-500'
+                        }`} />
+                        <strong className="text-xs font-bold text-[#0A2540] truncate">
+                          {item.client}
+                        </strong>
+                      </div>
+
+                      <span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider flex-shrink-0 ${
+                        item.type === 'WON_DEAL' ? 'bg-purple-100 text-purple-800 border border-purple-200/60' :
+                        item.type === 'INTERESTED' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200/60' :
+                        item.type === 'CALLBACK' ? 'bg-amber-100 text-amber-800 border border-amber-200/60' :
+                        'bg-sky-100 text-sky-800 border border-sky-200/60'
+                      }`}>
+                        {item.type === 'WON_DEAL' ? '🏆 Won Deal' :
+                         item.type === 'INTERESTED' ? '🟢 Interested' :
+                         item.type === 'CALLBACK' ? '⏰ Callback' : '💬 Connected'}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px] text-slate-500">
+                      <span>By <strong className="text-slate-700">{item.rep}</strong> • {item.contact}</span>
+                      {item.amount !== '—' && (
+                        <span className="font-mono font-black text-[#00A88B] text-xs">
+                          {item.amount}
+                        </span>
+                      )}
+                    </div>
+
+                    <p className="text-[11px] text-slate-600 italic bg-slate-50 p-2 rounded-xl border border-slate-100/80">
+                      "{item.note}"
+                    </p>
+
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono pt-0.5">
+                      <span>Lead Status Logged</span>
+                      <span>{item.time}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* --- TAB 2: TEAM (Live Attendance, Roster & 360 Dossier) --- */}
+        {activeTab === 'team' && (
+          <div className="space-y-3.5 animate-in fade-in duration-150">
+            {/* TODAY'S TEAM PULSE / REPORT BOX (Replaces old heading as requested) */}
+            <div className="bg-white border border-slate-200/90 shadow-xs rounded-2xl p-3.5 space-y-2.5">
+              {/* Top Row: Title + Live Status Pill (Image 2) */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-black tracking-wider text-[#0A2540] uppercase">
+                    Today's Team Pulse
+                  </span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                </div>
+                <div className="bg-[#E6F8F5] border border-[#B2EFE5] text-[#00897B] font-bold text-[10px] px-2.5 py-0.5 rounded-full">
+                  {presentCount} Present • {lateCount} Late • {onLeaveCount} Leave
+                </div>
+              </div>
+
+              {/* Subtle Divider */}
+              <div className="h-px bg-slate-100" />
+
+              {/* 4 Metric Columns: Team | Calls (Attended / Total) | Won | Revenue */}
+              <div className="grid grid-cols-4 gap-1 text-center divide-x divide-slate-100">
+                {/* 1. Team */}
+                <div className="px-1">
+                  <strong className="text-base font-display font-black text-[#0A2540] block leading-tight">
+                    {totalTeamStrength}
+                  </strong>
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                    Team
+                  </span>
+                </div>
+
+                {/* 2. Attended out of total calls */}
+                <div className="px-1">
+                  <strong className="text-base font-display font-black text-[#0A2540] block leading-tight">
+                    <span className="text-[#00A88B]">{totalActivities}</span>
+                    <span className="text-slate-300 font-normal text-xs">/{totalGoalCalls}</span>
+                  </strong>
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                    Calls
+                  </span>
+                </div>
+
+                {/* 3. Won */}
+                <div className="px-1">
+                  <strong className="text-base font-display font-black text-purple-700 block leading-tight">
+                    {totalWonToday}
+                  </strong>
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                    Won
+                  </span>
+                </div>
+
+                {/* 4. Revenue */}
+                <div className="px-1">
+                  <strong className="text-base font-display font-black text-[#00A88B] block leading-tight">
+                    {formatInLakhs(totalSales)}
+                  </strong>
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                    Revenue
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Mobile Search Bar */}
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input 
+                type="text" 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search employee by name or employee code..."
+                className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-[#00C9A7]"
+              />
+            </div>
+
+            {/* Date-Wise Selector for Squad */}
+            <div className="flex items-center justify-between gap-2.5 bg-slate-50/80 p-2.5 rounded-2xl border border-slate-200/80">
+              <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-2xs">
+                <Calendar className="w-4 h-4 text-[#00C9A7]" />
+                <span className="text-xs font-bold text-slate-500">Date:</span>
+                <input
+                  type="date"
+                  value={selectedRosterDate}
+                  max={todayStr}
+                  onChange={(e) => setSelectedRosterDate(e.target.value)}
+                  className="text-xs font-bold text-[#0A2540] bg-transparent focus:outline-none cursor-pointer"
+                />
+              </div>
+              {selectedRosterDate !== todayStr && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedRosterDate(todayStr)}
+                  className="text-xs font-bold px-3 py-1.5 rounded-xl bg-[#00C9A7]/20 text-[#00897B] hover:bg-[#00C9A7]/30 transition-all cursor-pointer shadow-2xs"
+                >
+                  Back to Today
+                </button>
+              )}
+            </div>
+
+            {/* Filter Pills with real numbers (Placed below search bar as requested) */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar">
+              <button
+                type="button"
+                onClick={() => setAttendanceFilter('ALL')}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap active:scale-95 cursor-pointer ${
+                  attendanceFilter === 'ALL'
+                    ? 'bg-[#0A2540] text-white shadow-xs'
+                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                All ({mySquadMembers.length})
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAttendanceFilter('PRESENT')}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap active:scale-95 cursor-pointer ${
+                  attendanceFilter === 'PRESENT'
+                    ? 'bg-[#0A2540] text-white shadow-xs'
+                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                Present ({presentCount})
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAttendanceFilter('LATE')}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap active:scale-95 cursor-pointer ${
+                  attendanceFilter === 'LATE'
+                    ? 'bg-[#0A2540] text-white shadow-xs'
+                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                Late ({lateCount})
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAttendanceFilter('ON_LEAVE')}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap active:scale-95 cursor-pointer ${
+                  attendanceFilter === 'ON_LEAVE'
+                    ? 'bg-[#0A2540] text-white shadow-xs'
+                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                Leave ({onLeaveCount})
+              </button>
+            </div>
+
+            {/* List of Telecallers - Native Touch Cards with Clear UI Highlights */}
+            <div className="space-y-3">
+              {filteredMembers.map((member) => {
+                const ev = evaluateMemberAttendanceForDate(
+                  member,
+                  selectedRosterDate,
+                  attendanceLogs,
+                  leaveRequests,
+                  calendarSettings,
+                  weeklyOffDays,
+                  companyHolidays
+                );
+                const isPresent = ev.status === 'PRESENT';
+                const isLate = ev.status === 'LATE';
+                const isLeave = ev.status === 'ON_LEAVE';
+
+                return (
+                  <div 
+                    key={member.id}
+                    onClick={() => setSelectedMemberFor360(member)}
+                    className="bg-white border border-slate-200/90 hover:border-[#00C9A7] rounded-2xl p-4 shadow-xs hover:shadow-md flex flex-col gap-3 cursor-pointer active:scale-[0.98] transition-all group"
+                  >
+                    {/* Member Header */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="relative flex-shrink-0">
+                          <div className={`w-11 h-11 rounded-2xl ${
+                            isPresent 
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/80' 
+                              : isLate 
+                              ? 'bg-amber-50 text-amber-700 border border-amber-200/80' 
+                              : isLeave
+                              ? 'bg-purple-50 text-purple-700 border border-purple-200/80'
+                              : 'bg-rose-50 text-rose-700 border border-rose-200/80'
+                          } flex items-center justify-center font-display font-black text-xs shadow-2xs group-hover:scale-105 transition-transform overflow-hidden`}>
+                            <EmployeeAvatar avatar={member.avatar} name={member.name} className="w-full h-full" fallbackClassName="font-display font-black text-xs" />
+                          </div>
+                          <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                            isPresent ? 'bg-emerald-500' : isLate ? 'bg-amber-500' : isLeave ? 'bg-purple-500' : 'bg-rose-500'
+                          }`} />
+                        </div>
+
+                        <div>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <strong className="text-xs font-bold text-[#0A2540] group-hover:text-[#00A88B] transition-colors">
+                              {member.name}
+                            </strong>
+                            <span className="text-[9px] font-bold text-slate-600 bg-slate-100 px-1.5 py-0.2 rounded-md border border-slate-200/80">
+                              {member.group}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className="text-[10px] text-slate-400 font-mono">
+                              {member.empCode} • {member.role ? member.role.replace(/telecaller/gi, 'Sales Executive') : 'Sales Executive'}
+                            </span>
+                            {isLate && (
+                              <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.2 rounded border border-amber-200/60">
+                                Late by {ev.lateMinutes || 0}m
+                              </span>
+                            )}
+                            {isLeave && (
+                              <span className="text-[10px] font-bold text-purple-700 bg-purple-50 px-1.5 py-0.2 rounded border border-purple-200/60">
+                                {ev.leave?.leaveType || 'Leave'}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider ${
+                        isPresent ? 'bg-emerald-100/90 text-emerald-800 border border-emerald-200/80' :
+                        isLate ? 'bg-amber-100/90 text-amber-800 border border-amber-200/80' :
+                        isLeave ? 'bg-purple-100 text-purple-800 border border-purple-200' :
+                        ev.status === 'WEEKLY_OFF' ? 'bg-slate-100 text-slate-700 border border-slate-200' :
+                        ev.status === 'HOLIDAY' ? 'bg-indigo-100 text-indigo-800 border border-indigo-200' :
+                        'bg-rose-100/90 text-rose-800 border border-rose-200/80'
+                      }`}>
+                        {ev.badgeLabel}
+                      </span>
+                    </div>
+
+                    {/* 3 Metric Matrix - Clean Elevated Micro-Cards */}
+                    <div className="grid grid-cols-3 gap-2 bg-slate-50/90 p-1.5 rounded-xl border border-slate-100 text-center">
+                      <div className="bg-white rounded-lg py-1.5 px-1 shadow-2xs border border-slate-100/80">
+                        <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Dials</span>
+                        <strong className="text-xs font-mono font-black text-[#0A2540]">{member.dialsToday}</strong>
+                      </div>
+                      <div className="bg-white rounded-lg py-1.5 px-1 shadow-2xs border border-slate-100/80">
+                        <span className="text-[9px] text-[#00A88B] block font-bold uppercase tracking-wider">Sales</span>
+                        <strong className="text-xs font-mono font-black text-[#00A88B]">{formatInLakhs(member.salesAchieved)}</strong>
+                      </div>
+                      <div className="bg-white rounded-lg py-1.5 px-1 shadow-2xs border border-slate-100/80">
+                        <span className="text-[9px] text-emerald-600 block font-bold uppercase tracking-wider">Interested</span>
+                        <strong className="text-xs font-mono font-black text-emerald-700">{member.interested || 0}</strong>
+                      </div>
+                    </div>
+
+                    {/* Footer: Check-in Time + Clean Interactive Pill Button */}
+                    <div className="flex items-center justify-between text-[10px] pt-1.5 border-t border-slate-100">
+                      <span className="text-slate-500 font-mono flex items-center gap-1">
+                        <Clock className="w-3 h-3 text-slate-400" />
+                        In: {ev.checkIn || (selectedRosterDate === todayStr ? member.checkInTime : undefined) || '—'}
+                      </span>
+                      <span className="px-2.5 py-1 rounded-xl bg-[#E6FAF6] text-[#00A88B] font-bold group-hover:bg-[#00C9A7] group-hover:text-[#0A2540] transition-colors flex items-center gap-1 shadow-2xs">
+                        <span>View Profile</span>
+                        <span>→</span>
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* --- TAB: CALLING (Team Leader Calling Desk & Lead Closer) --- */}
+        {activeTab === 'calling' && (
+          <div className="space-y-3.5 animate-in fade-in duration-150">
+            {/* Header with Closer Badge */}
+            <div className="bg-gradient-to-r from-[#0A2540] to-[#0F3258] text-white p-4 rounded-2xl shadow-sm flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="font-display font-black text-xl text-white">My Calling Desk</h2>
+                  <span className="text-[10px] font-black uppercase tracking-wider bg-[#00C9A7] text-[#0A2540] px-2 py-0.5 rounded-full">
+                    Executive Closer
+                  </span>
+                </div>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  Dial assigned leads, log outcomes, close won deals, and track your personal revenue.
+                </p>
+              </div>
+              <div className="w-10 h-10 rounded-2xl bg-white/10 flex items-center justify-center text-[#00C9A7]">
+                <PhoneCall className="w-5 h-5 stroke-[2.5]" />
+              </div>
+            </div>
+
+            {/* 4 Closer KPI Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <div className="bg-white border border-slate-200 rounded-2xl p-3 shadow-2xs">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Total Assigned</span>
+                <span className="font-display font-black text-xl text-[#0A2540] block mt-0.5">{myAssignedLeads.length}</span>
+              </div>
+              <div className="bg-white border border-amber-200/80 rounded-2xl p-3 shadow-2xs">
+                <span className="text-[10px] font-bold text-amber-700 uppercase tracking-wider block">Fresh / Uncalled</span>
+                <span className="font-display font-black text-xl text-amber-600 block mt-0.5">{myFreshLeadsCount}</span>
+              </div>
+              <div className="bg-white border border-blue-200/80 rounded-2xl p-3 shadow-2xs">
+                <span className="text-[10px] font-bold text-blue-700 uppercase tracking-wider block">Interested / Callback</span>
+                <span className="font-display font-black text-xl text-blue-600 block mt-0.5">
+                  {myAssignedLeads.filter(l => l.status === 'INTERESTED' || l.status === 'CALLBACK').length}
+                </span>
+              </div>
+              <div className="bg-white border border-emerald-200/80 rounded-2xl p-3 shadow-2xs">
+                <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider block">Won Deals</span>
+                <span className="font-display font-black text-xl text-emerald-600 block mt-0.5">{myWonDealsCount}</span>
+              </div>
+            </div>
+
+            {/* Search & Filter Bar */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-3 space-y-2.5 shadow-2xs">
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={callingSearchQuery}
+                  onChange={(e) => setCallingSearchQuery(e.target.value)}
+                  placeholder="Search lead by name, phone, company, or city..."
+                  className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-[#00C9A7]"
+                />
+              </div>
+
+              {/* Status Filter Pills */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar">
+                {[
+                  { id: 'ALL', label: 'All', count: callingCounts.all },
+                  { id: 'FRESH', label: 'Fresh', count: callingCounts.fresh },
+                  { id: 'INTERESTED', label: 'Interested', count: callingCounts.interested },
+                  { id: 'CALLBACK', label: 'Callback', count: callingCounts.callback },
+                  { id: 'CONVERTED', label: 'Won Deals', count: callingCounts.won },
+                  { id: 'BUSY', label: 'Busy', count: callingCounts.busy },
+                  { id: 'NOT_INTERESTED', label: 'Not Interested', count: callingCounts.notInterested },
+                ].map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => setCallingStatusFilter(f.id)}
+                    className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap active:scale-95 cursor-pointer flex items-center gap-1.5 ${
+                      callingStatusFilter === f.id
+                        ? 'bg-[#0A2540] text-white shadow-xs'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    <span>{f.label}</span>
+                    <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${
+                      callingStatusFilter === f.id ? 'bg-[#00C9A7] text-[#0A2540]' : 'bg-white text-slate-600'
+                    }`}>
+                      {f.count}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Leads List */}
+            {(() => {
+              const displayedLeads = filteredCallingLeads.slice(0, callingVisibleLimit);
+
+              if (!myAssignedLeads.length) {
+                return (
+                  <div className="bg-white border border-slate-200 rounded-3xl p-8 text-center space-y-3 shadow-2xs">
+                    <div className="w-12 h-12 rounded-2xl bg-teal-50 text-[#00A88B] flex items-center justify-center mx-auto">
+                      <PhoneCall className="w-6 h-6 stroke-[2]" />
+                    </div>
+                    <h3 className="font-display font-black text-base text-[#0A2540]">No Leads Assigned Yet</h3>
+                    <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                      Admin has not allocated calling leads to your account yet. Once Admin assigns a list to you from the Lead Allocation tab, they will appear here ready to dial.
+                    </p>
+                  </div>
+                );
+              }
+
+              if (!filteredCallingLeads.length) {
+                return (
+                  <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center text-slate-400 text-xs">
+                    No leads matching "{callingSearchQuery}" in {callingStatusFilter} filter.
+                  </div>
+                );
+              }
+
+              return (
+                <>
+                <div className="space-y-2.5">
+                  {displayedLeads.map((lead) => {
+                    const isWon = lead.status === 'CONVERTED';
+                    const isFresh = (lead.callCount || 0) === 0 && !isWon;
+                    return (
+                      <div
+                        key={lead.id}
+                        className={`bg-white border rounded-2xl p-3.5 shadow-2xs transition-all hover:border-[#00C9A7] ${
+                          isWon
+                            ? 'border-emerald-300 bg-emerald-50/20'
+                            : lead.status === 'INTERESTED'
+                            ? 'border-blue-300 bg-blue-50/20'
+                            : lead.status === 'CALLBACK'
+                            ? 'border-amber-300 bg-amber-50/20'
+                            : 'border-slate-200/90'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h4 className="font-display font-bold text-sm text-[#0A2540] truncate">
+                                {lead.name}
+                              </h4>
+                              {lead.company && (
+                                <span className="text-[10px] font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                                  {lead.company}
+                                </span>
+                              )}
+                              <span
+                                className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
+                                  isWon
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : lead.status === 'INTERESTED'
+                                    ? 'bg-blue-100 text-blue-800'
+                                    : lead.status === 'CALLBACK'
+                                    ? 'bg-amber-100 text-amber-800'
+                                    : isFresh
+                                    ? 'bg-purple-100 text-purple-800'
+                                    : 'bg-slate-100 text-slate-600'
+                                }`}
+                              >
+                                {isWon ? 'Won Deal' : isFresh ? 'Fresh' : lead.status || 'Pending'}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-3 text-xs text-slate-500 font-mono mt-1 flex-wrap">
+                              <button
+                                type="button"
+                                onClick={() => openCallModalForLead(lead)}
+                                className="font-bold text-slate-800 hover:text-[#00A88B] transition-colors cursor-pointer text-left"
+                              >
+                                {lead.phone || '—'}
+                              </button>
+                              {lead.city && <span>📍 {lead.city}</span>}
+                              <span>📞 {lead.callCount || 0} Dials</span>
+                              {lead.lastCallTimestamp && <span>🕒 {lead.lastCallTimestamp}</span>}
+                            </div>
+
+                            {lead.notes && (
+                              <p className="text-[11px] text-slate-600 bg-slate-50 p-2 rounded-xl mt-2 border border-slate-100">
+                                💬 "{lead.notes}"
+                              </p>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              dialPhoneNumber(lead.phone);
+                              openCallModalForLead(lead);
+                            }}
+                            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#00C9A7] hover:bg-[#00B4D8] text-[#0A2540] font-black text-xs shadow-xs active:scale-95 transition-all flex-shrink-0 cursor-pointer"
+                          >
+                            <Phone className="w-3.5 h-3.5 stroke-[2.5]" />
+                            <span>Call Lead</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {filteredCallingLeads.length > callingVisibleLimit && (
+                  <div className="pt-2 pb-4 text-center">
+                    <button
+                      type="button"
+                      onClick={() => setCallingVisibleLimit(prev => prev + 30)}
+                      className="px-5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-700 hover:text-[#00A88B] hover:border-[#00C9A7] font-bold text-xs shadow-2xs active:scale-95 transition-all cursor-pointer"
+                    >
+                      Load More Leads ({callingVisibleLimit} of {filteredCallingLeads.length})
+                    </button>
+                  </div>
+                )}
+              </>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* --- TAB 3: LEAVES (Leave Approvals & Monthly Calendar) --- */}
+        {activeTab === 'leaves' && (
+          <div className="space-y-3.5 animate-in fade-in duration-150">
+            {/* Top Header with Apply Leave Button */}
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-display font-black text-lg text-[#0A2540]">Leave Management</h2>
+                <p className="text-xs text-slate-500">Approvals, calendar & leave balance</p>
+              </div>
+
+              <button
+                onClick={() => setIsLeaveModalOpen(true)}
+                className="flex items-center gap-1.5 bg-[#00C9A7] hover:bg-[#00B4D8] text-[#0A2540] font-black text-xs px-3.5 py-2 rounded-xl shadow-xs active:scale-95 transition-all flex-shrink-0"
+              >
+                <Plus className="w-4 h-4 stroke-[3]" />
+                <span>Apply Leave</span>
+              </button>
+            </div>
+
+            {/* Segmented Sub-Tabs */}
+            <div className="flex p-1 bg-slate-100 rounded-2xl border border-slate-200">
+              <button
+                onClick={() => setLeaveSubTab('approvals')}
+                className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                  leaveSubTab === 'approvals'
+                    ? 'bg-[#0A2540] text-white shadow-xs font-black'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Team Approvals</span>
+                {pendingLeaves.length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full text-[9px] font-mono font-black bg-rose-500 text-white ml-0.5">
+                    {pendingLeaves.length}
+                  </span>
+                )}
+              </button>
+
+              <button
+                onClick={() => setLeaveSubTab('calendar')}
+                className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                  leaveSubTab === 'calendar'
+                    ? 'bg-[#0A2540] text-white shadow-xs font-black'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                <span>Leave Calendar</span>
+              </button>
+            </div>
+
+            {/* SUB-TAB 1: TEAM APPROVALS */}
+            {leaveSubTab === 'approvals' && (
+              <div className="space-y-3">
+                {/* Approvals Filter Pills with Live Counts */}
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-500">Filter Requests:</span>
+                  <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+                    {[
+                      { id: 'PENDING', label: 'Pending', count: squadLeaveRequests.filter(r => r.approvalStage === 'PENDING_TEAM_LEADER' || (!r.approvalStage && r.status === 'PENDING')).length },
+                      { id: 'APPROVED', label: 'Approved', count: squadLeaveRequests.filter(r => r.status === 'APPROVED').length },
+                      { id: 'REJECTED', label: 'Rejected', count: squadLeaveRequests.filter(r => r.status === 'REJECTED').length },
+                    ].map(s => (
+                      <button
+                        key={s.id}
+                        onClick={() => setApprovalsFilter(s.id as any)}
+                        className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 ${
+                          approvalsFilter === s.id ? 'bg-[#00C9A7] text-[#0A2540] shadow-xs' : 'text-slate-500 hover:text-slate-800'
+                        }`}
+                      >
+                        <span>{s.label}</span>
+                        <span className={`px-1 py-0.2 rounded-full text-[9px] font-mono font-bold ${
+                          approvalsFilter === s.id ? 'bg-[#0A2540] text-[#00C9A7]' : 'bg-slate-200 text-slate-600'
+                        }`}>
+                          {s.count}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  {squadLeaveRequests.filter(r => approvalsFilter === 'PENDING' 
+                    ? (r.approvalStage === 'PENDING_TEAM_LEADER' || (!r.approvalStage && r.status === 'PENDING'))
+                    : r.status === approvalsFilter).length === 0 ? (
+                    <div className="text-center py-8 bg-white border border-slate-200 rounded-2xl p-4 space-y-2">
+                      <CheckCircle2 className="w-8 h-8 text-emerald-500 mx-auto" />
+                      <span className="text-xs font-bold text-slate-700 block">No {approvalsFilter.toLowerCase()} requests</span>
+                      <span className="text-[10px] text-slate-400 block">All squad leave requests in this category have been processed.</span>
+                    </div>
+                  ) : (
+                    squadLeaveRequests.filter(r => approvalsFilter === 'PENDING'
+                      ? (r.approvalStage === 'PENDING_TEAM_LEADER' || (!r.approvalStage && r.status === 'PENDING'))
+                      : r.status === approvalsFilter).map((req) => (
+                      <div key={req.id} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-2.5">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <strong className="text-xs font-bold text-[#0A2540] block">{req.employeeName || 'Employee'}</strong>
+                            <span className="text-[11px] text-slate-500">{req.leaveType} ({req.totalDays} Days)</span>
+                          </div>
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                            req.status === 'APPROVED' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 
+                            req.status === 'REJECTED' ? 'bg-rose-50 text-rose-700 border border-rose-200' : 
+                            'bg-amber-50 text-amber-700 border border-amber-200'
+                          }`}>
+                            {req.status}
+                          </span>
+                        </div>
+
+                        {/* Approval Pipeline */}
+                        <div className="flex items-center gap-1 text-[9px] font-bold">
+                          {(['TL', 'HR', 'Admin'] as const).map((stage, idx) => {
+                            const stages = ['PENDING_TEAM_LEADER', 'PENDING_HR', 'PENDING_ADMIN'] as const;
+                            const isDone = req.status === 'APPROVED' || (
+                              req.approvalStage === 'PENDING_HR' && idx < 1 ||
+                              req.approvalStage === 'PENDING_ADMIN' && idx < 2
+                            );
+                            const isCurrent = req.approvalStage === stages[idx];
+                            return (
+                              <>
+                                <span key={stage} className={`px-1.5 py-0.5 rounded ${
+                                  req.status === 'REJECTED' ? 'bg-slate-100 text-slate-400' :
+                                  req.status === 'APPROVED' ? 'bg-emerald-100 text-emerald-700' :
+                                  isDone ? 'bg-emerald-100 text-emerald-700' :
+                                  isCurrent ? 'bg-amber-100 text-amber-700 ring-1 ring-amber-400' :
+                                  'bg-slate-100 text-slate-400'
+                                }`}>{stage}</span>
+                                {idx < 2 && <span className="text-slate-300">→</span>}
+                              </>
+                            );
+                          })}
+                        </div>
+
+                        <p className="text-xs text-slate-600 italic bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                          "{req.reason}"
+                        </p>
+
+                        <div className="flex justify-between items-center text-[11px] text-slate-500 font-mono">
+                          <span>{req.fromDate} to {req.toDate}</span>
+                          <span>Applied: {req.appliedOn}</span>
+                        </div>
+
+                        {(req.approvalStage === 'PENDING_TEAM_LEADER' || (!req.approvalStage && req.status === 'PENDING')) && (
+                          <div className="grid grid-cols-2 gap-2 pt-1">
+                            <button
+                              onClick={() => approveLeaveRequest(req.id)}
+                              className="py-2.5 rounded-xl bg-[#00C9A7] hover:bg-[#00B4D8] text-[#0A2540] font-black text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95 shadow-sm"
+                            >
+                              <Check className="w-4 h-4 stroke-[3]" />
+                              <span>Forward to HR</span>
+                            </button>
+                            <button
+                              onClick={() => setRejectingLeaveId(req.id)}
+                              className="py-2.5 rounded-xl bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95"
+                            >
+                              <X className="w-4 h-4" />
+                              <span>Reject</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* SUB-TAB 2: LEAVE CALENDAR & BALANCE */}
+            {leaveSubTab === 'calendar' && (
+              <div className="space-y-3.5">
+                {/* Leave Quota Card */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="font-display font-black text-sm text-[#0A2540]">Annual Leave Balance</h4>
+                      <p className="text-[11px] text-slate-500 font-medium">{profile.totalLeaveBalance || 0} Days Available</p>
+                    </div>
+                    <button
+                      onClick={() => setIsLeaveModalOpen(true)}
+                      className="text-[#00A88B] text-xs font-bold hover:underline flex items-center gap-1"
+                    >
+                      <span>+ Apply Now</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    <div className="bg-slate-50 p-2 rounded-xl border border-slate-100 text-center">
+                      <span className="text-[9px] text-slate-400 block font-bold uppercase">Casual</span>
+                      <strong className="text-xs font-mono font-black text-[#0A2540]">8 / 12</strong>
+                    </div>
+                    <div className="bg-slate-50 p-2 rounded-xl border border-slate-100 text-center">
+                      <span className="text-[9px] text-slate-400 block font-bold uppercase">Sick</span>
+                      <strong className="text-xs font-mono font-black text-[#0A2540]">5 / 7</strong>
+                    </div>
+                    <div className="bg-slate-50 p-2 rounded-xl border border-slate-100 text-center">
+                      <span className="text-[9px] text-slate-400 block font-bold uppercase">Paid</span>
+                      <strong className="text-xs font-mono font-black text-[#0A2540]">10 / 15</strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Monthly Calendar View */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                    <h4 className="font-display font-black text-sm text-[#0A2540]">{monthLabel}</h4>
+                    <div className="flex items-center gap-1">
+                      <button 
+                        onClick={() => setCalendarMonthOffset(c => c - 1)}
+                        className="p-1 rounded-lg hover:bg-slate-100 text-slate-600 active:scale-95 transition-all"
+                        title="Previous Month"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      <button 
+                        onClick={() => setCalendarMonthOffset(0)}
+                        className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 active:scale-95 transition-all"
+                      >
+                        Today
+                      </button>
+                      <button 
+                        onClick={() => setCalendarMonthOffset(c => c + 1)}
+                        className="p-1 rounded-lg hover:bg-slate-100 text-slate-600 active:scale-95 transition-all"
+                        title="Next Month"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Weekday Labels */}
+                  <div className="grid grid-cols-7 text-center text-[10px] font-bold text-slate-400">
+                    <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+                  </div>
+
+                  {/* Days Grid */}
+                  <div className="grid grid-cols-7 gap-1 text-center text-xs font-mono font-bold">
+                    {[...Array(leadingBlanks)].map((_, i) => (
+                      <div key={`blank-${i}`} />
+                    ))}
+                    {[...Array(daysInMonth)].map((_, i) => {
+                      const day = i + 1;
+                      const status = statusByDay.get(day);
+                      const dateStr = `${calYear}-${String(calMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                      const dayOfWeek = new Date(calYear, calMonth, day).getDay();
+                      const holidayMatch = companyHolidays.find(h => h.date === dateStr);
+                      const isWeeklyOff = weeklyOffDays.includes(dayOfWeek);
+                      const isToday = dateStr === todayStr;
+
+                      return (
+                        <div
+                          key={day}
+                          title={holidayMatch ? `Holiday: ${holidayMatch.name}` : isWeeklyOff ? 'Weekly Off' : status || undefined}
+                          className={`h-10 rounded-xl flex flex-col items-center justify-center relative transition-all ${
+                            isToday ? 'bg-[#00C9A7] text-[#0A2540] shadow-sm font-black ring-2 ring-[#00C9A7]/50' :
+                            status === 'LEAVE' ? 'bg-amber-100 text-amber-900 border border-amber-300' :
+                            status === 'ABSENT' ? 'bg-rose-100 text-rose-900 border border-rose-300' :
+                            holidayMatch || status === 'HOLIDAY' ? 'bg-purple-100 text-purple-900 border border-purple-300 font-extrabold' :
+                            status === 'HALF_DAY' ? 'bg-sky-50 text-sky-900 border border-sky-200' :
+                            status === 'PRESENT' ? 'bg-emerald-50/80 text-emerald-900 border border-emerald-200' :
+                            isWeeklyOff ? 'bg-slate-100 text-slate-400 border border-slate-200/80' :
+                            'text-slate-400'
+                          }`}
+                        >
+                          <span className="text-[11px] leading-none">{day}</span>
+                          {holidayMatch && <span className="text-[8px] font-black leading-none text-purple-700 mt-0.5">★</span>}
+                          {status === 'PRESENT' && !isToday && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-0.5" />
+                          )}
+                          {status === 'LEAVE' && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-0.5" />
+                          )}
+                          {status === 'ABSENT' && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500 mt-0.5" />
+                          )}
+                          {isWeeklyOff && !holidayMatch && !status && (
+                            <span className="text-[8px] text-slate-400 mt-0.5 leading-none font-medium">OFF</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Calendar Legend */}
+                  <div className="grid grid-cols-2 gap-1.5 text-[10px] font-bold text-slate-600 pt-2.5 border-t border-slate-100">
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                      Present ({presentDays} Days)
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-amber-500" />
+                      Leave ({leaveDays} Days)
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-rose-500" />
+                      Absent ({absentDays} Days)
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-slate-400" />
+                      Weekly Off
+                    </span>
+                    <span className="flex items-center gap-1.5 col-span-2">
+                      <span className="w-2 h-2 rounded-full bg-purple-600" />
+                      Company Holiday
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* --- TAB 4: REPORTS (Dynamic Calling Analytics & CSV Export) --- */}
+        {activeTab === 'reports' && (
+          <div className="space-y-3.5 animate-in fade-in duration-150">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-display font-black text-lg text-[#0A2540]">Performance Reports</h2>
+                <p className="text-xs text-slate-500">Live dials &amp; sales analytics</p>
+              </div>
+              <button
+                onClick={exportTeamReportCSV}
+                className="py-2 px-3 rounded-xl bg-[#00C9A7] text-[#0A2540] font-black text-xs flex items-center gap-1.5 shadow-sm"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>CSV</span>
+              </button>
+            </div>
+
+            {/* Timeframe Selector Pills */}
+            <div className="flex items-center justify-between bg-slate-100 p-1 rounded-xl border border-slate-200 gap-0.5">
+              {(['today', 'week', 'month', 'custom'] as const).map(tf => (
+                <button
+                  key={tf}
+                  id={`tl-reports-tf-${tf}`}
+                  onClick={() => setReportsTimeframe(tf)}
+                  className={`flex-1 py-1.5 rounded-lg text-xs font-bold capitalize transition-all ${
+                    reportsTimeframe === tf ? 'bg-white text-[#0A2540] shadow-xs' : 'text-slate-500'
+                  }`}
+                >
+                  {tf === 'today' ? 'Today' : tf === 'week' ? 'This Week' : tf === 'month' ? 'This Month' : 'Date'}
+                </button>
+              ))}
+            </div>
+
+            {/* Custom date-range picker */}
+            {reportsTimeframe === 'custom' && (
+              <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-xs space-y-2 animate-in fade-in duration-150">
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase space-y-1">
+                    <span className="block">From</span>
+                    <input
+                      id="tl-reports-from"
+                      type="date"
+                      value={reportsFrom}
+                      max={getTodayDateIST()}
+                      onChange={e => e.target.value && setReportsFrom(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-mono font-bold text-[#0A2540] focus:outline-none focus:border-[#00C9A7]"
+                    />
+                  </label>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase space-y-1">
+                    <span className="block">To</span>
+                    <input
+                      id="tl-reports-to"
+                      type="date"
+                      value={reportsTo}
+                      max={getTodayDateIST()}
+                      onChange={e => e.target.value && setReportsTo(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-mono font-bold text-[#0A2540] focus:outline-none focus:border-[#00C9A7]"
+                    />
+                  </label>
+                </div>
+                <div className="flex gap-1.5">
+                  {[
+                    { label: 'Yesterday', days: 1, single: true },
+                    { label: 'Last 7', days: 6 },
+                    { label: 'Last 30', days: 29 },
+                  ].map(q => (
+                    <button
+                      key={q.label}
+                      onClick={() => {
+                        const now = new Date();
+                        const start = new Date(now.getTime() - q.days * 86400000);
+                        setReportsFrom(getTodayDateIST(start));
+                        setReportsTo(q.single ? getTodayDateIST(start) : getTodayDateIST(now));
+                      }}
+                      className="flex-1 py-1 rounded-lg text-[10px] font-bold bg-slate-50 border border-slate-200 text-slate-600 hover:border-[#00C9A7]"
+                    >
+                      {q.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Dynamic Summary Chips */}
+            <div className="grid grid-cols-2 gap-2.5">
+              <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs">
+                <span className="text-[10px] text-slate-500 block font-semibold uppercase">Total Dials</span>
+                <span className="font-mono-nums font-black text-xl text-[#0A2540]">{tfDials} Calls</span>
+                <span className="text-[10px] text-slate-400 block mt-0.5">{tfConnectRate}% Connect Rate</span>
+              </div>
+              <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs">
+                <span className="text-[10px] text-slate-500 block font-semibold uppercase">Verified Revenue</span>
+                <span className="font-mono-nums font-black text-xl text-[#00A88B]">{formatInLakhs(tfSales)}</span>
+                <span className="text-[10px] text-amber-600 font-bold block mt-0.5">{tfTargetPercent}% of {formatInLakhs(tfTarget)} target</span>
+              </div>
+            </div>
+
+            {/* Day-wise revenue breakdown */}
+            <div className="space-y-2">
+              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                Day-wise Revenue ({reportsPeriodLabel})
+              </span>
+              {tfDailyBreakdown.length === 0 ? (
+                <div className="bg-white p-3.5 rounded-2xl border border-dashed border-slate-200 text-center text-[11px] text-slate-400">
+                  No verified revenue in this period
+                </div>
+              ) : (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-xs divide-y divide-slate-100">
+                  {tfDailyBreakdown.map(d => {
+                    const max = Math.max(...tfDailyBreakdown.map(x => x.revenue), 1);
+                    return (
+                      <div key={d.date} className="px-3.5 py-2.5 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono font-bold text-[#0A2540]">
+                            {new Date(`${d.date}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' })}
+                          </span>
+                          <span className="font-mono-nums font-black text-[#00A88B]">
+                            {formatInLakhs(d.revenue)}
+                            <span className="text-slate-400 font-semibold ml-1.5">· {d.deals} deal{d.deals === 1 ? '' : 's'}</span>
+                          </span>
+                        </div>
+                        <div className="h-1.5 mt-1.5 rounded-full bg-slate-100 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-[#00C9A7] to-[#00B4D8] transition-all duration-500"
+                            style={{ width: `${Math.max(4, Math.round((d.revenue / max) * 100))}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Telecaller Performance List */}
+            <div className="space-y-2">
+              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                Caller Ranking ({reportsPeriodLabel})
+              </span>
+              {membersByDials.map((m, i) => {
+                const callerDials = (m as any).callerDials ?? 0;
+                const callerSales = (m as any).callerSales ?? 0;
+                const callerDeals = (m as any).callerDeals ?? 0;
+
+                return (
+                  <div 
+                    key={m.id} 
+                    onClick={() => setSelectedMemberFor360(m)}
+                    className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between text-xs cursor-pointer active:scale-98 transition-all hover:border-[#00C9A7]"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className="font-mono font-bold text-slate-400 w-5">#{i + 1}</span>
+                      <div>
+                        <strong className="font-bold text-[#0A2540] block">{m.name}</strong>
+                        <span className="text-[10px] text-slate-400">{m.group}</span>
+                      </div>
+                    </div>
+                    <div className="text-right font-mono-nums">
+                      <span className="text-[#0A2540] font-bold block">{callerDials} Calls</span>
+                      <span className="text-[#00A88B] text-[10px] font-bold">
+                        {formatInLakhs(callerSales)}{callerDeals > 0 ? ` · ${callerDeals} deal${callerDeals === 1 ? '' : 's'}` : ''}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* --- TAB 5: MEETINGS (Video Hub & 1-on-1s) --- */}
+        {activeTab === 'meetings' && (
+          <div className="space-y-3.5 animate-in fade-in duration-150">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-display font-black text-lg text-[#0A2540]">Team Meetings & Video Hub</h2>
+                <p className="text-xs text-slate-500">Launch calls &amp; hold team coaching</p>
+              </div>
+            </div>
+
+            {/* Quick Action Buttons */}
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => startInstantMeeting('Team Discussion')}
+                className="py-3 px-3 rounded-2xl bg-gradient-to-r from-[#00C9A7] to-[#00B4D8] text-[#0A2540] font-black text-xs flex items-center justify-center gap-2 shadow-sm active:scale-95 transition-all"
+              >
+                <Video className="w-4 h-4" />
+                <span>Start Meeting</span>
+              </button>
+
+              <button
+                onClick={() => setIsMeetingModalOpen(true)}
+                className="py-3 px-3 rounded-2xl bg-white border border-slate-200 hover:border-[#00C9A7] font-bold text-xs flex items-center justify-center gap-2 text-[#0A2540] shadow-xs active:scale-95 transition-all"
+              >
+                <Calendar className="w-4 h-4 text-[#00C9A7]" />
+                <span>Schedule Meeting</span>
+              </button>
+            </div>
+
+            {/* Scheduled Meetings List */}
+            <div className="space-y-2.5">
+              <h3 className="font-bold text-xs text-slate-500 uppercase tracking-wider">Upcoming Meetings</h3>
+              {teamMeetings.length === 0 ? (
+                <div className="text-center py-8 bg-white border border-slate-200 rounded-2xl p-4">
+                  <Video className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                  <span className="text-xs font-bold text-slate-700 block">No upcoming meetings</span>
+                  <span className="text-[10px] text-slate-400">Start an instant meeting or schedule one above.</span>
+                </div>
+              ) : (
+                teamMeetings.map((mtg) => (
+                  <div key={mtg.id} className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-xs space-y-2.5">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-extrabold text-[#00A88B] bg-[#E6FAF6] px-2 py-0.5 rounded-md uppercase">
+                            {mtg.type}
+                          </span>
+                          {mtg.status === 'LIVE' && (
+                            <span className="text-[9px] font-black text-rose-700 bg-rose-100 px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse">
+                              <Radio className="w-2.5 h-2.5 text-rose-600" /> LIVE NOW
+                            </span>
+                          )}
+                        </div>
+                        <h4 className="font-bold text-xs text-[#0A2540] mt-1">{mtg.title}</h4>
+                      </div>
+                      <span className="text-[11px] font-mono text-slate-400 font-bold">{mtg.dateTime}</span>
+                    </div>
+
+                    {mtg.agenda && (
+                      <p className="text-[11px] text-slate-600 bg-slate-50 p-2 rounded-xl italic">
+                        "{mtg.agenda}"
+                      </p>
+                    )}
+
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                      <button
+                        onClick={() => copyMeetingLink(mtg.meetingLink)}
+                        className="text-[11px] font-bold text-slate-500 flex items-center gap-1 hover:text-slate-800"
+                      >
+                        <Copy className="w-3.5 h-3.5" /> Copy Link
+                      </button>
+
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => deleteTeamMeeting(mtg.id)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 text-xs"
+                          title="Delete"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => joinMeeting(mtg)}
+                          className={`px-3 py-1.5 rounded-xl font-black text-xs flex items-center gap-1 transition-all ${
+                            mtg.status === 'LIVE' 
+                              ? 'bg-[#00C9A7] text-[#0A2540]' 
+                              : 'bg-[#0A2540] text-[#00C9A7]'
+                          }`}
+                        >
+                          <Video className="w-3 h-3" />
+                          <span>{mtg.status === 'LIVE' ? 'Join' : 'Start'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* --- TAB 7: PROFILE & MY DOCUMENTS (Digital ID Card, Offer Letter, Experience Cert, Relieving Letter, Payslips) --- */}
+        {activeTab === 'profile' && (
+          <div className="space-y-3.5 animate-in fade-in duration-150">
+            <ProfileSelfServiceView onBack={() => setActiveTab('home')} />
+          </div>
+        )}
+
+      </main>
+
+      {/* Bottom Navigation Tabs (Native Mobile Bar / Desktop Floating Dock) */}
+      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-lg border-t border-slate-200 px-1.5 py-1.5 flex justify-between sm:justify-around items-center shadow-lg lg:bottom-4 lg:left-1/2 lg:-translate-x-1/2 lg:w-full lg:max-w-2xl lg:rounded-2xl lg:border lg:shadow-xl lg:px-4 overflow-x-auto no-scrollbar">
+        {[
+          { id: 'home', label: 'Home', icon: Home },
+          { id: 'team', label: 'Team', icon: Users },
+          { id: 'calling', label: 'Calling', icon: PhoneCall, badge: myFreshLeadsCount },
+          { id: 'leaves', label: 'Leaves', icon: Calendar, badge: pendingLeaves.length },
+          { id: 'reports', label: 'Reports', icon: TrendingUp },
+          { id: 'meetings', label: 'Meetings', icon: Video },
+          { id: 'profile', label: 'My Docs', icon: User },
+        ].map((item) => {
+          const Icon = item.icon;
+          const isActive = activeTab === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => setActiveTab(item.id as any)}
+              className={`flex flex-col items-center justify-center py-1 px-1.5 sm:px-3 rounded-xl transition-all relative flex-1 max-w-[75px] sm:max-w-none ${
+                isActive ? 'text-[#00C9A7]' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <div className="relative">
+                <Icon className={`w-5 h-5 ${isActive ? 'stroke-[2.5]' : 'stroke-2'}`} />
+                {item.badge !== undefined && item.badge > 0 && (
+                  <span className="absolute -top-1.5 -right-2 w-4 h-4 rounded-full bg-rose-500 text-white font-black text-[9px] flex items-center justify-center ring-2 ring-white">
+                    {item.badge}
+                  </span>
+                )}
+              </div>
+              <span className={`text-[10px] font-bold mt-0.5 truncate ${isActive ? 'text-[#00A88B] font-extrabold' : ''}`}>
+                {item.label}
+              </span>
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* Schedule Meeting Modal (Mobile Optimized) */}
+      {isMeetingModalOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-3 animate-in fade-in duration-150">
+          <div 
+            className="bg-white text-slate-800 rounded-3xl w-full max-w-md max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 animate-in zoom-in-95 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="bg-[#0A2540] text-white p-4.5 flex items-center justify-between relative overflow-hidden flex-shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-teal-500/20 border border-teal-400/40 flex items-center justify-center text-[#00C9A7] shadow-inner">
+                  <Video className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <h3 className="font-display font-black text-base text-white">Squad Video Meeting</h3>
+                    <span className="text-[9px] font-black uppercase tracking-wider bg-[#00C9A7] text-[#0A2540] px-1.5 py-0.5 rounded font-mono">
+                      {profile?.teamName || 'Squad'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    Host private squad huddles or 1-on-1 reviews
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setIsMeetingModalOpen(false)} 
+                className="text-slate-400 hover:text-white p-1 rounded-xl hover:bg-white/10 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateMeetingSubmit} className="flex-1 overflow-y-auto p-4.5 space-y-3.5 text-xs">
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">
+                  Meeting Title <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={meetingTitle}
+                  onChange={(e) => setMeetingTitle(e.target.value)}
+                  placeholder="e.g. Target Review / Daily Sales Sprint"
+                  className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 font-bold focus:outline-none focus:border-[#00C9A7]"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Meeting Format</label>
+                <select
+                  value={meetingType}
+                  onChange={(e) => setMeetingType(e.target.value)}
+                  className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 font-bold"
+                >
+                  <option value="Team Discussion">👥 Full Squad Huddle ({profile?.teamName || 'Squad'})</option>
+                  <option value="1-on-1 Call">🤝 1-on-1 Squad Member Review</option>
+                  <option value="Problem Solving">⚡ Pipeline &amp; Objection Solving</option>
+                </select>
+              </div>
+
+              {/* 1-on-1 Squad Member Picker */}
+              {meetingType === '1-on-1 Call' && (
+                <div className="p-3 rounded-2xl bg-teal-50/60 border border-teal-200 space-y-1.5">
+                  <label className="font-bold text-[#0A2540] block">Select Squad Member for 1-on-1:</label>
+                  <select
+                    value={selectedSquadMemberId}
+                    onChange={(e) => setSelectedSquadMemberId(e.target.value)}
+                    className="w-full p-2.5 rounded-xl bg-white border border-teal-300 text-slate-800 font-bold text-xs"
+                  >
+                    {teamMembers.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.empCode} • {m.role})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Date, Exact Time & Duration Scheduler */}
+              <MeetingTimePicker
+                onChange={(formatted) => setMeetingTime(formatted)}
+                accentColor="teal"
+              />
+
+              {/* 👑 Request Super Admin to Join Toggle */}
+              <div className="p-3 rounded-2xl bg-amber-50/80 border border-amber-300 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-base">👑</span>
+                  <div>
+                    <span className="font-black text-xs text-amber-900 block leading-tight">
+                      Request Super Admin to Join
+                    </span>
+                    <span className="text-[10px] text-amber-700 block">
+                      Dispatches invite to Executive Dashboard
+                    </span>
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={tlIncludeAdmin}
+                  onChange={(e) => setTlIncludeAdmin(e.target.checked)}
+                  className="w-4 h-4 text-amber-600 rounded focus:ring-amber-500 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Agenda / Target Notes</label>
+                <textarea
+                  value={meetingAgenda}
+                  onChange={(e) => setMeetingAgenda(e.target.value)}
+                  placeholder="Review dial count, target gap, pipeline hurdles..."
+                  className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 text-xs h-18 focus:outline-none focus:border-[#00C9A7]"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsMeetingModalOpen(false)}
+                  className="w-1/3 py-2.5 px-4 rounded-xl bg-slate-100 text-slate-600 font-bold text-xs hover:bg-slate-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="w-2/3 py-2.5 rounded-xl bg-[#00C9A7] hover:bg-[#00B4D8] text-[#0A2540] font-black shadow-md shadow-[#00C9A7]/25 text-xs flex items-center justify-center gap-1.5"
+                >
+                  <Video className="w-4 h-4" />
+                  <span>Create Meeting</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Reject Leave Reason Modal */}
+      {rejectingLeaveId && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white text-slate-800 rounded-3xl p-6 w-full max-w-md shadow-2xl space-y-4 border border-slate-200 animate-in zoom-in-95">
+            <h3 className="font-display font-black text-lg text-rose-700">Reject Leave Request</h3>
+            <p className="text-xs text-slate-500">Enter rejection remarks for employee feedback:</p>
+            <textarea
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              placeholder="e.g. Critical campaign deadline / Shift understaffing"
+              className="w-full p-3 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 text-xs h-24 focus:outline-none focus:border-rose-500"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  rejectLeaveRequest(rejectingLeaveId, rejectReason);
+                  setRejectingLeaveId(null);
+                  setRejectReason('');
+                }}
+                className="flex-1 py-3 rounded-xl bg-rose-600 text-white font-bold text-xs shadow-sm"
+              >
+                Confirm Rejection
+              </button>
+              <button
+                onClick={() => setRejectingLeaveId(null)}
+                className="py-3 px-4 rounded-xl bg-slate-100 text-slate-600 font-bold text-xs"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+};

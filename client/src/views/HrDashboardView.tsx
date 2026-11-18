@@ -1,0 +1,3750 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { useApp } from '../context/AppContext';
+import { useListDefault } from '../hooks/useListDefault';
+import { useScreenData } from '../hooks/useScreenData';
+import { getTodayDateIST, normalizeDateToYMD } from '../utils/dateUtils';
+import { evaluateMemberAttendanceForDate } from '../utils/attendanceUtils';
+import { 
+  Menu,
+  Bell,
+  Users, 
+  UserCheck, 
+  FileText, 
+  CreditCard, 
+  UserPlus, 
+  CheckCircle2, 
+  XCircle, 
+  Plus, 
+  Download, 
+  ChevronRight, 
+  TrendingUp, 
+  Layers, 
+  Check, 
+  Home,
+  MoreHorizontal,
+  DollarSign,
+  QrCode,
+  Printer,
+  Shield,
+  Calendar,
+  Briefcase,
+  ScanFace,
+  Award,
+  Sparkles,
+  PhoneCall,
+  Video,
+  Send,
+  Upload,
+  User,
+  Search,
+  Clock,
+  ArrowLeft,
+  CalendarCheck,
+  AlertCircle,
+  AlertTriangle,
+  Camera,
+  Filter,
+  Copy,
+  Eye,
+  EyeOff,
+  Key,
+  Lock,
+  Receipt,
+  ExternalLink,
+  LogOut,
+  FileEdit,
+  Trash2,
+  Mail
+} from 'lucide-react';
+import { OnboardingEmployee, ExitEmployee, TeamMember, TeamGroup, PayslipItem } from '../types';
+import { AddEmployeeModal } from '../components/modals/AddEmployeeModal';
+import { PayrollBuilderModal } from '../components/modals/PayrollBuilderModal';
+import { computePayrollTotals } from '../components/payroll/payrollTemplate';
+import { TopPerformersShowcase } from '../components/common/TopPerformersShowcase';
+import { RejectedLeaveBanner } from '../components/common/RejectedLeaveBanner';
+import { OfferLetterModal } from '../components/modals/OfferLetterModal';
+import { GenerateOfferLetterModal } from '../components/modals/GenerateOfferLetterModal';
+import { DigitalIdCardModal } from '../components/modals/DigitalIdCardModal';
+import { FaceRegistrationModal } from '../components/modals/FaceRegistrationModal';
+import { SendBroadcastModal } from '../components/modals/SendBroadcastModal';
+import { Employee360ProfileView } from './Employee360ProfileView';
+import { EmployeeAvatar } from '../components/common/EmployeeAvatar';
+import { MeetingTimePicker } from '../components/common/MeetingTimePicker';
+import { InvoicesLedger } from '../components/common/InvoicesLedger';
+import { scrollToTop } from '../utils/scrollUtils';
+
+const formatInLakhs = (val: number) => {
+  if (val >= 100000) {
+    return `₹${(val / 100000).toFixed(2).replace(/\.00$/, '')} L`;
+  }
+  return `₹${val.toLocaleString('en-IN')}`;
+};
+
+const isMemberOfSquad = (m: TeamMember, squadName?: string) =>
+  squadName ? (m.group || '').split(',').map((s: string) => s.trim().toLowerCase()).includes(squadName.trim().toLowerCase()) : false;
+
+export const HrDashboardView: React.FC = () => {
+  const {
+    currentUser,
+    profile,
+    attendanceLogs,
+    openPunchIn,
+    openPunchOut,
+    teamMembers,
+    teamGroups,
+    candidates,
+    onboardingList,
+    exitList,
+    payslips,
+    deletePayslip,
+    leaveRequests,
+    paymentVerifications,
+    offerLetters,
+    deleteOfferLetter,
+    setSelectedOfferLetter,
+    setIsOfferLetterModalOpen,
+    openOfferLetterModal,
+    openGenerateOfferLetterModal,
+    experienceCerts,
+    openExperienceCertModal,
+    openGenerateExperienceCertModal,
+    relievingLetters,
+    openRelievingLetterModal,
+    openGenerateRelievingLetterModal,
+    invoices,
+    openInvoiceModal,
+    openGenerateInvoiceModal,
+    setIsIdCardModalOpen,
+    selectedIdCardEmpId,
+    setSelectedIdCardEmpId,
+    openPayslipModal,
+    teamMeetings,
+    joinMeeting,
+    updateTeamMeeting,
+    deleteTeamMeeting,
+    setIsFaceRegistrationModalOpen,
+    setFaceRegistrationEmployee,
+    scheduleInterview,
+    scheduleTeamMeeting,
+    updateCandidateStatus,
+    toggleOnboardingChecklist,
+    toggleExitChecklist,
+    generateBulkPayslips,
+    approveLeaveRequest,
+    rejectLeaveRequest,
+    verifyPayment,
+    triggerToast,
+    refreshResources,
+    logout,
+    setIsLeaveModalOpen,
+    setIsNotificationDrawerOpen,
+    unreadNotificationCount,
+    sendPayslipEmailToEmployee,
+    calendarSettings,
+    weeklyOffDays,
+    companyHolidays,
+  } = useApp();
+
+  const [emailingPayslipId, setEmailingPayslipId] = useState<string | null>(null);
+
+  useScreenData('hrDashboard');
+
+  const hrName = currentUser?.name || profile?.name || 'HR Manager';
+  const hrFirstName = hrName.trim().split(' ')[0] || 'HR';
+  const hrEmail = currentUser?.email || profile?.email || 'hr@tradenexus.in';
+  const hrCode = currentUser?.empCode || profile?.empCode || 'HR-01';
+  const hrInitials = hrName
+    ? hrName
+        .trim()
+        .split(' ')
+        .filter(Boolean)
+        .map((w) => w[0])
+        .join('')
+        .slice(0, 2)
+        .toUpperCase()
+    : 'HR';
+
+  // --- Attendance dispute & punch state derived from profile & attendance logs ---
+  const today = getTodayDateIST();
+  const empId = currentUser?.employeeId || currentUser?.id || profile?.id;
+  const todayAttendance = attendanceLogs.find(
+    (a) => a.date === today && (a.employeeId === empId || a.employeeId === currentUser?.empCode || a.id?.includes(empId || '') || (a.employeeName && profile?.name && a.employeeName.toLowerCase() === profile.name.toLowerCase()))
+  );
+  const isAttendanceDisputed = Boolean(profile?.disputedByAdmin) || Boolean(todayAttendance?.disputedByAdmin);
+  const attendanceDisputeReason = profile?.disputeReason || todayAttendance?.disputeReason || 'Your punch-in photo was flagged as suspicious.';
+  const isPunchedInToday =
+    !isAttendanceDisputed &&
+    (profile?.faceIdStatus === 'VERIFIED_PRESENT' || Boolean(todayAttendance?.checkIn && !todayAttendance?.checkOut));
+  const punchInTimeDisplay = isAttendanceDisputed ? '' : (profile?.checkInTime || todayAttendance?.checkIn || '');
+
+  const [activeHrNav, setActiveHrNavState] = useState<'home' | 'attendance' | 'employees' | 'approvals' | 'reports' | 'more'>(() => {
+    try {
+      return (localStorage.getItem('tnx_hrTab') as any) || 'home';
+    } catch {
+      return 'home';
+    }
+  });
+
+  // Scroll to top on HR tab switch
+  useEffect(() => {
+    scrollToTop();
+  }, [activeHrNav]);
+
+  const setActiveHrNav = (newNav: 'home' | 'attendance' | 'employees' | 'approvals' | 'reports' | 'more') => {
+    setActiveHrNavState(newNav);
+    scrollToTop();
+    try {
+      localStorage.setItem('tnx_hrTab', newNav);
+    } catch {}
+  };
+  const [selectedTeamGroup, setSelectedTeamGroup] = useState<TeamGroup | null>(null);
+  const [selectedEmployeeFor360, setSelectedEmployeeFor360] = useState<TeamMember | null>(null);
+  
+  // Search & Filter for Team Roster
+  const [searchQuery, setSearchQuery] = useState('');
+  const [attendanceFilter, setAttendanceFilter] = useState<'ALL' | 'PRESENT' | 'LATE' | 'ON_LEAVE'>('ALL');
+  const [selectedAttendanceDate, setSelectedAttendanceDate] = useState<string>(() => getTodayDateIST());
+
+  // Dedicated More Tab: Assets, Credentials & History Registry
+  const [moreSubTab, setMoreSubTab] = useState<'id_cards' | 'payslips' | 'meetings' | 'offers' | 'hr_account' | 'onboard' | 'credentials' | 'interviews' | 'invoices'>('payslips');
+  const [moreSearchQuery, setMoreSearchQuery] = useState('');
+  const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({});
+
+  const togglePasswordVisibility = (empId: string) => {
+    setVisiblePasswords(prev => ({ ...prev, [empId]: !prev[empId] }));
+  };
+
+  const handleCopyCredentials = (_emp: TeamMember) => {
+    triggerToast('⚠️ Employee login credentials are confidential and accessible only to Super Admin.');
+  };
+
+  // Modals
+  const [isAddEmployeeModalOpen, setIsAddEmployeeModalOpen] = useState(false);
+  const [isBroadcastModalOpen, setIsBroadcastModalOpen] = useState(false);
+  const [broadcastCategory, setBroadcastCategory] = useState<'ANNOUNCEMENT' | 'BIRTHDAY' | 'TARGET_ALERT' | 'PERFORMANCE' | 'GENERAL'>('ANNOUNCEMENT');
+  const [broadcastPrefilledEmp, setBroadcastPrefilledEmp] = useState<any>(null);
+  const [isGenerateOfferLetterModalOpen, setIsGenerateOfferLetterModalOpen] = useState(false);
+  const [isInterviewModalOpen, setIsInterviewModalOpen] = useState(false);
+  const [isPayslipGenModalOpen, setIsPayslipGenModalOpen] = useState(false);
+
+  // Payroll Builder: null = new payroll, otherwise the record being edited / viewed
+  const [builderPayslip, setBuilderPayslip] = useState<PayslipItem | null>(null);
+  const openPayrollBuilder = (ps?: PayslipItem | null) => {
+    setBuilderPayslip(ps || null);
+    setIsPayslipGenModalOpen(true);
+  };
+
+  // Schedule Interview States
+  const [candName, setCandName] = useState('');
+  const [candRole, setCandRole] = useState('Senior Sales Executive');
+  const [candExp, setCandExp] = useState('2+ Years in B2B Sales');
+  const [candEmail, setCandEmail] = useState('');
+  const [candPhone, setCandPhone] = useState('');
+  const [candTime, setCandTime] = useState('Tomorrow • 02:30 PM');
+  const [interviewTeamScope, setInterviewTeamScope] = useState('ALL');
+  const [selectedInterviewers, setSelectedInterviewers] = useState<string[]>([]);
+
+  // HR Zoom Meeting Scheduler States
+  const [isHrMeetingModalOpen, setIsHrMeetingModalOpen] = useState(false);
+  const [hrMeetingTitle, setHrMeetingTitle] = useState('');
+  const [hrMeetingType, setHrMeetingType] = useState('1-on-1 Employee Sync');
+  const [hrMeetingScope, setHrMeetingScope] = useState<'INDIVIDUAL' | 'ALL_TL' | 'ALL'>('INDIVIDUAL');
+  const [hrSelectedEmpId, setHrSelectedEmpId] = useState(teamMembers[0]?.id || '');
+  const [hrIncludeAdmin, setHrIncludeAdmin] = useState(true);
+  const [hrMeetingTime, setHrMeetingTime] = useState('Today • 04:00 PM');
+  const [hrMeetingAgenda, setHrMeetingAgenda] = useState('');
+  const [hrEmpSearch, setHrEmpSearch] = useState('');
+
+  const idCardEmp = teamMembers.find((m) => m.id === selectedIdCardEmpId);
+  useListDefault(selectedIdCardEmpId, setSelectedIdCardEmpId, teamMembers, (m) => m.id);
+
+  // Filtered members for Team Roster
+  const filteredMembers = useMemo(() => {
+    return teamMembers.filter((m) => {
+      const ev = evaluateMemberAttendanceForDate(
+        m,
+        selectedAttendanceDate,
+        attendanceLogs,
+        leaveRequests,
+        calendarSettings,
+        weeklyOffDays,
+        companyHolidays
+      );
+      const matchSearch =
+        m.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        m.empCode.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (m.group && m.group.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        (ev.leave?.leaveType && ev.leave.leaveType.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        (ev.leave?.reason && ev.leave.reason.toLowerCase().includes(searchQuery.toLowerCase()));
+      const matchFilter =
+        attendanceFilter === 'ALL'
+          ? true
+          : attendanceFilter === 'PRESENT'
+          ? (ev.status === 'PRESENT' || ev.status === 'LATE')
+          : attendanceFilter === 'LATE'
+          ? ev.status === 'LATE'
+          : attendanceFilter === 'ON_LEAVE'
+          ? ev.status === 'ON_LEAVE'
+          : ev.status === attendanceFilter;
+      return matchSearch && matchFilter;
+    });
+  }, [teamMembers, searchQuery, attendanceFilter, selectedAttendanceDate, attendanceLogs, leaveRequests, calendarSettings, weeklyOffDays, companyHolidays]);
+
+  // Set of active employee names (lower-cased) for filtering docs belonging to deleted accounts
+  const activeEmpNames = useMemo(() => new Set(teamMembers.map(m => m.name.toLowerCase())), [teamMembers]);
+  const activeEmpCodes = useMemo(() => new Set(teamMembers.map(m => m.empCode.toLowerCase())), [teamMembers]);
+  const activeEmpIds = useMemo(() => new Set(teamMembers.map(m => m.id)), [teamMembers]);
+
+  // Active payslips filtered to current existing workforce
+  const activePayslips = useMemo(() => {
+    return payslips.filter(ps => {
+      const nameMatch = Boolean(ps.employeeName && activeEmpNames.has(ps.employeeName.toLowerCase()));
+      const codeMatch = Boolean(ps.employeeCode && activeEmpCodes.has(ps.employeeCode.toLowerCase()));
+      const idMatch = Boolean(ps.employeeId && (activeEmpIds.has(ps.employeeId) || activeEmpCodes.has(ps.employeeId.toLowerCase())));
+      return nameMatch || codeMatch || idMatch;
+    });
+  }, [payslips, activeEmpNames, activeEmpCodes]);
+
+  // Org stats derived from evaluated attendance on selected date
+  const totalTeams = teamGroups.length;
+  const totalEmployees = teamMembers.length;
+
+  const { onLeaveCount, presentCount, lateCount, absentCount } = useMemo(() => {
+    let onLeave = 0;
+    let present = 0;
+    let late = 0;
+    let absent = 0;
+    teamMembers.forEach((m) => {
+      const ev = evaluateMemberAttendanceForDate(
+        m,
+        selectedAttendanceDate,
+        attendanceLogs,
+        leaveRequests,
+        calendarSettings,
+        weeklyOffDays,
+        companyHolidays
+      );
+      if (ev.status === 'ON_LEAVE') onLeave++;
+      else if (ev.status === 'LATE') late++;
+      else if (ev.status === 'PRESENT') present++;
+      else absent++;
+    });
+    return { onLeaveCount: onLeave, presentCount: present, lateCount: late, absentCount: absent };
+  }, [teamMembers, selectedAttendanceDate, attendanceLogs, leaveRequests, calendarSettings, weeklyOffDays, companyHolidays]);
+
+  const attendancePercent = Math.round((presentCount / Math.max(1, totalEmployees)) * 100);
+
+  const lateEmployees = useMemo(() => {
+    return teamMembers.filter((m) => {
+      const ev = evaluateMemberAttendanceForDate(m, selectedAttendanceDate, attendanceLogs, leaveRequests, calendarSettings, weeklyOffDays, companyHolidays);
+      return ev.status === 'LATE';
+    });
+  }, [teamMembers, selectedAttendanceDate, attendanceLogs, leaveRequests, calendarSettings, weeklyOffDays, companyHolidays]);
+
+  const onLeaveEmployees = useMemo(() => {
+    return teamMembers.filter((m) => {
+      const ev = evaluateMemberAttendanceForDate(m, selectedAttendanceDate, attendanceLogs, leaveRequests, calendarSettings, weeklyOffDays, companyHolidays);
+      return ev.status === 'ON_LEAVE';
+    });
+  }, [teamMembers, selectedAttendanceDate, attendanceLogs, leaveRequests, calendarSettings, weeklyOffDays, companyHolidays]);
+
+  const totalActivities = teamMembers.reduce((sum, m) => sum + (m.dialsToday || 0), 0);
+  const totalGoalCalls = teamMembers.reduce((sum, m) => sum + (m.goalCalls || 0), 0);
+  
+  // Authentic verified payments matching Admin Dashboard
+  const todayYMD = getTodayDateIST();
+  const uniquePayments = useMemo(() => {
+    const seen = new Set<string>();
+    return (paymentVerifications || []).filter((p) => {
+      const key = `${(p.companyName || p.leadName || '').trim().toLowerCase()}_${(p.telecallerName || '').trim().toLowerCase()}_${p.dealAmount}_${p.status}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [paymentVerifications]);
+
+  const verifiedPayments = useMemo(() => uniquePayments.filter(p => p.status === 'VERIFIED'), [uniquePayments]);
+
+  const todayVerifiedSales = useMemo(() =>
+    verifiedPayments
+      .filter(p => (p.timestamp || '').slice(0, 10) === todayYMD)
+      .reduce((sum: number, p) => sum + (p.dealAmount || 0), 0),
+    [verifiedPayments, todayYMD]
+  );
+
+  const todayWonDealsCount = useMemo(() =>
+    verifiedPayments.filter(p => (p.timestamp || '').slice(0, 10) === todayYMD).length,
+    [verifiedPayments, todayYMD]
+  );
+
+  const totalWonToday = todayWonDealsCount;
+
+  const formatInLakhs = (amount: number) => {
+    if (amount >= 100000) {
+      const lakhs = (amount / 100000).toFixed(2);
+      return `₹${lakhs.replace(/\.00$/, '')} L`;
+    }
+    return `₹${amount.toLocaleString('en-IN')}`;
+  };
+
+  const totalSalesTarget = teamMembers.reduce((sum, m) => sum + m.salesTarget, 0);
+  const totalSalesAchieved = teamMembers.reduce((sum, m) => sum + m.salesAchieved, 0);
+  const targetAchievedPercent = Math.round((totalSalesAchieved / Math.max(1, totalSalesTarget)) * 100);
+
+  const pendingLeavesCount =
+    leaveRequests.filter((r) => {
+      // Exclude deleted employees
+      if (r.employeeName && !activeEmpNames.has(r.employeeName.toLowerCase())) return false;
+      return r.status === 'PENDING' && r.approvalStage === 'PENDING_HR';
+    }).length;
+
+  const pendingPaymentsCount = paymentVerifications.filter((p) => p.status === 'PENDING_HR_AUDIT').length;
+  const pendingApprovalsCount = pendingLeavesCount + pendingPaymentsCount;
+
+  // Detect employees who have birthdays today or upcoming
+  const todayBirthdays = useMemo(() => {
+    const today = getTodayDateIST();
+    const mmdd = today.slice(5, 10); // MM-DD
+    return teamMembers.filter((m) => {
+      const rawDob = (m as any).dob;
+      if (!rawDob) return false;
+      // Handle YYYY-MM-DD or DD/MM/YYYY
+      if (rawDob.includes('-') && rawDob.length >= 10) {
+        return rawDob.slice(5, 10) === mmdd;
+      }
+      if (rawDob.includes('/') && rawDob.length >= 10) {
+        const parts = rawDob.split('/');
+        // parts[0] is DD, parts[1] is MM
+        const formatted = `${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+        return formatted === mmdd;
+      }
+      return false;
+    });
+  }, [teamMembers]);
+
+  // Leave Section View Mode: Team Approvals vs Personal Leaves
+  const [leaveSectionMode, setLeaveSectionMode] = useState<'approvals' | 'my_leaves'>('approvals');
+
+  const hrEmpId = currentUser?.employeeId || currentUser?.id || profile.id;
+
+  const myLeaves = useMemo(() => {
+    return leaveRequests.filter((r) => {
+      if (hrEmpId && (r.employeeId === hrEmpId || (r as any).userId === hrEmpId)) return true;
+      if (hrCode && r.employeeCode === hrCode) return true;
+      if (r.employeeName && hrName && r.employeeName.toLowerCase().trim() === hrName.toLowerCase().trim()) return true;
+      return false;
+    });
+  }, [leaveRequests, hrEmpId, hrCode, hrName]);
+
+  // Leave Approvals & Sanctions States
+  const [leaveApprovalTab, setLeaveApprovalTab] = useState<'PENDING' | 'APPROVED' | 'REJECTED'>('PENDING');
+  const [approvedCategoryFilter, setApprovedCategoryFilter] = useState<'ALL' | 'Casual Leave' | 'Sick Leave' | 'Earned / Paid Leave'>('ALL');
+
+  // HR only sees leaves pending at their stage (PENDING_HR) — filter out deleted employee requests
+  const activeLeaveRequests = useMemo(() => leaveRequests.filter(r => {
+    // Keep if employee name matches an active employee or no name filter available
+    if (!r.employeeName) return true;
+    return activeEmpNames.has(r.employeeName.toLowerCase());
+  }), [leaveRequests, activeEmpNames]);
+  const pendingLeaves = useMemo(() => activeLeaveRequests.filter((r) => r.status === 'PENDING' && r.approvalStage === 'PENDING_HR'), [activeLeaveRequests]);
+  const approvedLeaves = useMemo(() => activeLeaveRequests.filter((r) => r.status === 'APPROVED'), [activeLeaveRequests]);
+  const rejectedLeaves = useMemo(() => activeLeaveRequests.filter((r) => r.status === 'REJECTED'), [activeLeaveRequests]);
+
+  const approvedCasualCount = useMemo(() => approvedLeaves.filter((r) => r.leaveType === 'Casual Leave').length, [approvedLeaves]);
+  const approvedSickCount = useMemo(() => approvedLeaves.filter((r) => r.leaveType === 'Sick Leave').length, [approvedLeaves]);
+  const approvedEarnedCount = useMemo(() => approvedLeaves.filter((r) => r.leaveType.includes('Earned') || r.leaveType.includes('Paid')).length, [approvedLeaves]);
+  const totalApprovedDays = useMemo(() => approvedLeaves.reduce((sum, r) => sum + (r.totalDays || 1), 0), [approvedLeaves]);
+
+  const displayedApprovedLeaves = useMemo(() => {
+    if (approvedCategoryFilter === 'ALL') return approvedLeaves;
+    if (approvedCategoryFilter === 'Earned / Paid Leave') {
+      return approvedLeaves.filter((r) => r.leaveType.includes('Earned') || r.leaveType.includes('Paid'));
+    }
+    return approvedLeaves.filter((r) => r.leaveType === approvedCategoryFilter);
+  }, [approvedLeaves, approvedCategoryFilter]);
+
+  const teamAnalyticsData = [
+    { team: 'HNI Closers', percent: 96 },
+    { team: 'Inbound Qualifiers', percent: 92 },
+    { team: 'Retention Squad', percent: 88 },
+    { team: 'Enterprise Growth', percent: 94 },
+  ];
+
+  const handleScheduleInterviewSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!candName.trim()) return;
+
+    // 1. Create interview record
+    scheduleInterview({
+      candidateName: candName.trim(),
+      roleApplied: candRole,
+      experience: candExp,
+      email: candEmail || `${candName.toLowerCase().replace(/\s+/g, '.')}@gmail.com`,
+      phone: candPhone || '+91 98765 43210',
+      interviewTime: candTime,
+      interviewer: selectedInterviewers.join(', ') || 'HR & Team Leader',
+    });
+
+    // 2. Dispatch Live Video Meeting to attendees' dashboards
+    scheduleTeamMeeting({
+      title: `Candidate Interview: ${candName} (${candRole})`,
+      dateTime: candTime,
+      type: 'Candidate Interview (Video Call)',
+      location: 'In-App Video Room',
+      agenda: `HR & Technical screening for ${candName} applying for ${candRole}. Attendees: ${selectedInterviewers.join(', ')}`,
+      attendeesCount: selectedInterviewers.length + 1,
+      invitedMemberName: selectedInterviewers.join(', '),
+      includeAdmin: true,
+      createdByRole: 'hr',
+    });
+
+    setCandName('');
+    setIsInterviewModalOpen(false);
+    triggerToast(`✓ Candidate Interview & Live Call dispatched to ${selectedInterviewers.join(', ')}!`);
+  };
+
+  const handleCreateHrMeetingSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!hrMeetingTitle.trim()) {
+      triggerToast('Please provide a meeting title');
+      return;
+    }
+
+    const selectedEmp = teamMembers.find(m => m.id === hrSelectedEmpId);
+    const scopeLabel = hrMeetingScope === 'INDIVIDUAL' 
+      ? `1-on-1 with ${selectedEmp?.name || 'Staff'}`
+      : hrMeetingScope === 'ALL_TL' 
+        ? 'All Team Leaders' 
+        : 'All Employees';
+
+    scheduleTeamMeeting({
+      title: hrMeetingTitle.trim(),
+      dateTime: hrMeetingTime,
+      type: hrMeetingType,
+      location: 'In-App Video Room',
+      agenda: hrMeetingAgenda.trim() || `HR Coordination meeting with ${scopeLabel}.`,
+      targetAudience: hrMeetingScope,
+      targetEmployeeId: hrMeetingScope === 'INDIVIDUAL' ? hrSelectedEmpId : undefined,
+      invitedMemberName: hrMeetingScope === 'INDIVIDUAL' ? selectedEmp?.name : undefined,
+      attendeesCount: hrMeetingScope === 'INDIVIDUAL' ? 2 : (hrMeetingScope === 'ALL_TL' ? totalTeams + 1 : totalEmployees + 1),
+      includeAdmin: hrIncludeAdmin,
+      createdByRole: 'hr',
+      priority: hrIncludeAdmin ? 'HIGH' : 'NORMAL',
+    });
+
+    setHrMeetingTitle('');
+    setHrMeetingAgenda('');
+    setIsHrMeetingModalOpen(false);
+    triggerToast(`✓ Meeting scheduled for ${scopeLabel}!`);
+  };
+
+  const exportHrReportCSV = () => {
+    const csvContent =
+      'data:text/csv;charset=utf-8,' +
+      'ID,Name,Role,Group,Attendance,Dials,Sales Target,Sales Achieved\n' +
+      teamMembers
+        .map(
+          (m) =>
+            `${m.id},"${m.name}","${m.role}","${m.group}",${m.attendanceStatus},${m.dialsToday},${m.salesTarget},${m.salesAchieved}`
+        )
+        .join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `HR_Workforce_Report_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    triggerToast('✓ HR Workforce Analytics Report downloaded (CSV)');
+  };
+
+  // If 360 Dossier is open, render Employee360ProfileView
+  if (selectedEmployeeFor360) {
+    return (
+      <div className="min-h-screen bg-[#F8FAFC] pb-24 px-3 sm:px-6 pt-2">
+        <Employee360ProfileView
+          member={selectedEmployeeFor360}
+          onBack={() => setSelectedEmployeeFor360(null)}
+          viewerRole="hr"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8FAFC] pb-24 text-slate-800 animate-in fade-in duration-150">
+      
+      <div className="p-4 sm:p-6 lg:p-8 space-y-4 w-full max-w-7xl mx-auto">
+
+        {/* Rejected Leave Escalation Banner */}
+        <RejectedLeaveBanner className="mb-2" />
+
+        {/* --- TAB 1: HR HOME / PULSE --- */}
+        {activeHrNav === 'home' && (
+          <div className="space-y-4 animate-in fade-in duration-150">
+            
+            {/* HR Authenticated Identity Header */}
+            <div className="flex items-center justify-between pt-1">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="font-display font-black text-2xl text-[#0A2540] tracking-tight">
+                    Hello, {hrFirstName}
+                  </h2>
+                  <span className="text-xl">👋</span>
+                </div>
+                <p className="text-xs font-semibold text-slate-500 mt-0.5">
+                  HR Portal • <span className="text-[#00A88B] font-bold">{hrEmail}</span> • <span className="text-slate-400 font-mono">{hrCode}</span>
+                </p>
+              </div>
+
+              {/* Broadcast Alert & Push Notification Action Button */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBroadcastCategory('ANNOUNCEMENT');
+                    setBroadcastPrefilledEmp(null);
+                    setIsBroadcastModalOpen(true);
+                  }}
+                  className="px-3.5 py-2 bg-gradient-to-r from-amber-500 to-amber-600 text-white font-black text-xs rounded-xl flex items-center gap-2 shadow-sm border border-amber-400 active:scale-95 transition-all cursor-pointer"
+                >
+                  <Sparkles className="w-4 h-4 text-amber-200" />
+                  <span>Send Broadcast Alert</span>
+                </button>
+              </div>
+            </div>
+
+            {/* 🎂 Birthday Celebration Spotlight Banner if any employee has birthday today */}
+            {todayBirthdays.length > 0 && (
+              <div className="bg-gradient-to-r from-amber-50 via-rose-50 to-amber-50 border-2 border-amber-300 rounded-3xl p-4 shadow-sm space-y-2 animate-in slide-in-from-top-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-amber-400 text-amber-950 flex items-center justify-center text-xl flex-shrink-0 shadow-sm">
+                      🎂
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-black text-[#0A2540] uppercase tracking-wider flex items-center gap-1.5">
+                        <span>Birthday Celebration Today!</span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 font-black">
+                          {todayBirthdays.length} Member{todayBirthdays.length > 1 ? 's' : ''}
+                        </span>
+                      </h4>
+                      <p className="text-xs text-slate-600 font-semibold mt-0.5">
+                        {todayBirthdays.map(m => m.name).join(', ')} {todayBirthdays.length > 1 ? 'are' : 'is'} celebrating their birthday today!
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBroadcastCategory('BIRTHDAY');
+                      setBroadcastPrefilledEmp(todayBirthdays[0]);
+                      setIsBroadcastModalOpen(true);
+                    }}
+                    className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-[#00C9A7] to-[#00A88B] text-[#0A2540] font-black text-xs flex items-center gap-1.5 shadow-sm active:scale-95 transition-all cursor-pointer"
+                  >
+                    <span>🎉 Send Birthday Announcement</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* ⚠️ Suspicious Attendance Dispute Alert Banner */}
+            {isAttendanceDisputed && (
+              <div className="bg-rose-50 border-2 border-rose-400 rounded-3xl p-4 shadow-sm space-y-3 animate-in slide-in-from-top-2">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-rose-500 text-white flex items-center justify-center flex-shrink-0 shadow-sm mt-0.5">
+                    <AlertTriangle className="w-5 h-5 stroke-[2.5]" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-black uppercase tracking-wider text-rose-900">
+                        Attendance Flagged by Admin
+                      </span>
+                      <span className="text-[9px] font-black px-2 py-0.5 rounded-full bg-rose-200 text-rose-800">
+                        Punch In Required
+                      </span>
+                    </div>
+                    <p className="text-xs text-rose-700 font-semibold mt-1">
+                      Your punch-in was flagged as suspicious by admin.
+                    </p>
+                    <div className="bg-white/90 border border-rose-200 rounded-xl px-3 py-2 mt-1.5 text-xs font-semibold text-rose-800 shadow-2xs">
+                      <span className="text-[10px] font-bold text-rose-400 uppercase tracking-wider block">Admin Reason:</span>
+                      "{attendanceDisputeReason}"
+                    </div>
+                    <p className="text-[11px] text-rose-600 mt-2 font-medium">
+                      Please punch in again with a clear, live face selfie so admin can cross-verify and approve your attendance.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={openPunchIn}
+                  className="w-full py-3 rounded-2xl bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-700 hover:to-rose-600 text-white font-black text-xs shadow-md shadow-rose-500/25 flex items-center justify-center gap-2 active:scale-95 transition-all cursor-pointer"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>Punch In Again (Clear Face Photo)</span>
+                </button>
+              </div>
+            )}
+
+            {/* HR Attendance Punch Lifecycle Card */}
+            {!isAttendanceDisputed && (
+              <div className="bg-white border border-[#00C9A7]/40 shadow-xs rounded-2xl p-3.5 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[#00C9A7]/15 text-[#00A88B] flex items-center justify-center flex-shrink-0">
+                    <UserCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-display font-bold text-xs text-[#0A2540]">My Attendance (HR Punch)</h4>
+                    <p className="text-[10px] text-slate-500 font-mono">
+                      {isPunchedInToday && punchInTimeDisplay ? `Punched in: ${punchInTimeDisplay}` : 'Face scan required to check in'}
+                    </p>
+                  </div>
+                </div>
+
+                {isPunchedInToday ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      ✓ Present
+                    </span>
+                    <button
+                      type="button"
+                      onClick={openPunchOut}
+                      className="px-3 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs border border-rose-200 transition-all active:scale-95 cursor-pointer"
+                    >
+                      Punch Out
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={openPunchIn}
+                    className="px-3.5 py-1.5 rounded-xl bg-[#00C9A7] hover:bg-[#00B4D8] text-[#0A2540] font-black text-xs transition-all shadow-xs active:scale-95 cursor-pointer"
+                  >
+                    Punch In (Face ID)
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* 🔴 Active LIVE & Scheduled Upcoming Meetings for HR */}
+            {(() => {
+              const activeMeetings = teamMeetings.filter(m => m.status === 'LIVE' || m.status === 'UPCOMING');
+              if (activeMeetings.length === 0) return null;
+
+              // Deduplicate by normalized title + dateTime so duplicate meetings are never stacked
+              const seen = new Set<string>();
+              const deduplicatedMeetings = activeMeetings.filter(m => {
+                const key = m.id || `${(m.title || '').trim().toLowerCase()}_${(m.dateTime || '').trim().toLowerCase()}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+              });
+
+              return (
+                <div className="space-y-2">
+                  {deduplicatedMeetings.slice(0, 3).map((mtg) => {
+                    const isLive = mtg.status === 'LIVE';
+                    return (
+                      <div 
+                        key={mtg.id}
+                        className={`p-3.5 border-2 rounded-2xl flex items-center justify-between gap-3 shadow-xs animate-in slide-in-from-top-2 ${
+                          isLive 
+                            ? 'bg-gradient-to-r from-emerald-50 via-teal-50 to-blue-50 border-emerald-500' 
+                            : 'bg-white border-blue-200'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <span className="relative flex h-3 w-3 flex-shrink-0">
+                            {isLive ? (
+                              <>
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-600"></span>
+                              </>
+                            ) : (
+                              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500"></span>
+                            )}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded-md ${
+                                isLive ? 'text-emerald-900 bg-emerald-200' : 'text-blue-900 bg-blue-100'
+                              }`}>
+                                {isLive ? '🔴 Live Meeting' : '📅 Scheduled'}
+                              </span>
+                            </div>
+                            <h4 className="font-bold text-xs text-[#0A2540] truncate mt-0.5">
+                              {mtg.title}
+                            </h4>
+                            <span className="text-[10px] text-slate-500 block truncate">
+                              {mtg.dateTime ? `📅 ${mtg.dateTime} · ` : ''}Host: {mtg.hostName || 'HR'} · {mtg.invitedMemberName ? `Target: ${mtg.invitedMemberName}` : 'All Staff'}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => joinMeeting(mtg)}
+                            className="px-3 py-1.5 bg-[#00C9A7] hover:bg-[#00B4D8] text-[#0A2540] font-black text-xs rounded-xl flex items-center gap-1.5 shadow-sm active:scale-95 transition-all cursor-pointer"
+                            title="Start or Join Meeting"
+                          >
+                            <Video className="w-3.5 h-3.5" />
+                            <span>{isLive ? 'Join Live' : 'Start / Join'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => updateTeamMeeting(mtg.id, { status: 'COMPLETED' })}
+                            className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors cursor-pointer"
+                            title="Mark as Completed"
+                          >
+                            <CheckCircle2 className="w-4 h-4" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (window.confirm(`Cancel/remove meeting "${mtg.title}"?`)) {
+                                deleteTeamMeeting(mtg.id);
+                              }
+                            }}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                            title="Cancel Meeting"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
+            {/* 🏆 Monthly Top Sales Champions Showcase (Hall of Fame) */}
+            <TopPerformersShowcase />
+
+            {/* 3 Top Stat Cards */}
+            <div className="grid grid-cols-3 gap-2.5">
+              
+              {/* Card 1: Teams */}
+              <div 
+                onClick={() => setActiveHrNav('employees')}
+                className="bg-white border border-slate-200 rounded-2xl p-3 shadow-xs flex flex-col justify-between cursor-pointer hover:border-[#00C9A7] transition-all active:scale-95"
+              >
+                <span className="text-[11px] font-bold text-slate-600 leading-tight mb-1">
+                  Teams
+                </span>
+                <span className="font-display font-black text-2xl text-[#0A2540]">
+                  {totalTeams}
+                </span>
+              </div>
+
+              {/* Card 2: Employees */}
+              <div 
+                onClick={() => setActiveHrNav('employees')}
+                className="bg-white border border-slate-200 rounded-2xl p-3 shadow-xs flex flex-col justify-between cursor-pointer hover:border-[#00C9A7] transition-all active:scale-95"
+              >
+                <span className="text-[11px] font-bold text-slate-600 leading-tight mb-1">
+                  Employees
+                </span>
+                <span className="font-display font-black text-2xl text-[#0A2540]">
+                  {totalEmployees}
+                </span>
+              </div>
+
+              {/* Card 3: On Leave */}
+              <div 
+                onClick={() => setActiveHrNav('approvals')}
+                className="bg-white border border-amber-200/80 rounded-2xl p-3 shadow-xs flex flex-col justify-between cursor-pointer hover:border-amber-500 transition-all active:scale-95"
+              >
+                <span className="text-[11px] font-bold text-amber-700 leading-tight mb-1">
+                  On Leave
+                </span>
+                <span className="font-display font-black text-2xl text-amber-600">
+                  {onLeaveCount}
+                </span>
+              </div>
+
+            </div>
+
+            {/* Today's Floor Overview Section */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="font-display font-bold text-sm text-[#0A2540]">
+                  Today's Floor Overview
+                </h3>
+                <span className="text-[11px] font-bold text-[#00A88B] bg-[#E6FAF6] px-2.5 py-0.5 rounded-full flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#00A88B] animate-pulse" />
+                  Live Sync
+                </span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2.5">
+                {/* Attendance - Real Headcount */}
+                <div 
+                  onClick={() => {
+                    setAttendanceFilter('PRESENT');
+                    setActiveHrNav('attendance');
+                  }}
+                  className="bg-white border border-slate-200 hover:border-emerald-400 rounded-2xl p-3 shadow-xs text-center space-y-1 cursor-pointer transition-all active:scale-95 group"
+                >
+                  <span className="text-[10px] font-bold text-slate-500 block">Attendance</span>
+                  <span className="font-display font-black text-xl text-emerald-600 block group-hover:scale-105 transition-transform">
+                    {presentCount} <span className="text-xs text-slate-400 font-normal">/ {totalEmployees}</span>
+                  </span>
+                  <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-md inline-block">
+                    {attendancePercent}% On Floor
+                  </span>
+                </div>
+
+                {/* Late Punch-ins - Replaces Target Achieved */}
+                <div 
+                  onClick={() => {
+                    setAttendanceFilter('LATE');
+                    setActiveHrNav('attendance');
+                  }}
+                  className="bg-white border border-slate-200 hover:border-amber-400 rounded-2xl p-3 shadow-xs text-center space-y-1 cursor-pointer transition-all active:scale-95 group"
+                >
+                  <span className="text-[10px] font-bold text-slate-500 block">Late Punch-ins</span>
+                  <span className="font-display font-black text-xl text-amber-600 block group-hover:scale-105 transition-transform">
+                    {lateCount}
+                  </span>
+                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md inline-block ${
+                    lateCount > 0 ? 'text-amber-800 bg-amber-50 border border-amber-200/80' : 'text-slate-500 bg-slate-100'
+                  }`}>
+                    {lateCount > 0 ? 'Late Flagged' : 'All On Time'}
+                  </span>
+                </div>
+
+                {/* Today's Revenue - Verified Payments matching Admin Source of Truth */}
+                <div 
+                  onClick={() => setActiveHrNav('reports')}
+                  className="bg-white border border-slate-200 hover:border-emerald-400 rounded-2xl p-3 shadow-xs text-center space-y-1 cursor-pointer transition-all active:scale-95 group"
+                >
+                  <span className="text-[10px] font-bold text-slate-500 block">Today's Revenue</span>
+                  <span className="font-display font-black text-xl text-emerald-600 block group-hover:scale-105 transition-transform">
+                    ₹{todayVerifiedSales.toLocaleString('en-IN')}
+                  </span>
+                  <span className="text-[9px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200/80 px-1.5 py-0.5 rounded-md inline-block">
+                    {todayWonDealsCount} Won Deals
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Quick Operations Grid (HR Quick Actions moved above attendance exceptions) */}
+            <div className="space-y-2">
+              <h3 className="font-display font-bold text-sm text-[#0A2540]">
+                HR Quick Actions
+              </h3>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                
+                {/* Action 1: Onboard New Employee */}
+                <button
+                  onClick={() => setIsAddEmployeeModalOpen(true)}
+                  className="bg-gradient-to-r from-teal-500/10 to-emerald-500/10 border-2 border-[#00C9A7]/60 hover:border-[#00C9A7] rounded-2xl p-3.5 shadow-sm flex items-center gap-3 text-left transition-all active:scale-95 group"
+                >
+                  <div className="w-9 h-9 rounded-xl bg-[#00C9A7] text-slate-950 flex items-center justify-center font-bold flex-shrink-0 group-hover:scale-105 transition-transform shadow-xs">
+                    <UserPlus className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <strong className="text-xs font-black text-[#0A2540] block">Onboard Employee</strong>
+                    <span className="text-[10px] text-teal-800 font-medium">Create credentials</span>
+                  </div>
+                </button>
+
+                {/* Action 2: Generate Offer Letter */}
+                <button
+                  onClick={() => openGenerateOfferLetterModal()}
+                  className="bg-white border border-slate-200 hover:border-[#00C9A7] rounded-2xl p-3.5 shadow-xs flex items-center gap-3 text-left transition-all active:scale-95"
+                >
+                  <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center font-bold flex-shrink-0">
+                    <Award className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <strong className="text-xs font-bold text-[#0A2540] block">Offer Letter</strong>
+                    <span className="text-[10px] text-slate-500">Pre-onboarding form</span>
+                  </div>
+                </button>
+
+                {/* Action 3: Generate Payslips */}
+                <button
+                  onClick={() => openPayrollBuilder()}
+                  className="bg-white border border-slate-200 hover:border-[#00C9A7] rounded-2xl p-3.5 shadow-xs flex items-center gap-3 text-left transition-all active:scale-95"
+                >
+                  <div className="w-9 h-9 rounded-xl bg-[#E6FAF6] text-[#00A88B] flex items-center justify-center font-bold flex-shrink-0">
+                    <DollarSign className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <strong className="text-xs font-bold text-[#0A2540] block">Create Payroll</strong>
+                    <span className="text-[10px] text-slate-500">Customize &amp; dispatch</span>
+                  </div>
+                </button>
+
+                {/* Action 4: ID Card Generation */}
+                <button
+                  onClick={() => {
+                    if (!selectedIdCardEmpId && teamMembers.length > 0) {
+                      setSelectedIdCardEmpId(teamMembers[0].id);
+                    }
+                    setIsIdCardModalOpen(true);
+                  }}
+                  className="bg-white border border-slate-200 hover:border-[#00C9A7] rounded-2xl p-3.5 shadow-xs flex items-center gap-3 text-left transition-all active:scale-95 cursor-pointer group"
+                >
+                  <div className="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold flex-shrink-0 group-hover:scale-105 transition-transform">
+                    <CreditCard className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <strong className="text-xs font-bold text-[#0A2540] block">ID Card Generation</strong>
+                    <span className="text-[10px] text-slate-500">Print &amp; QR badge</span>
+                  </div>
+                </button>
+
+                {/* Action 5: Experience Certificate */}
+                <button
+                  onClick={() => openGenerateExperienceCertModal()}
+                  className="bg-white border border-slate-200 hover:border-[#00C9A7] rounded-2xl p-3.5 shadow-xs flex items-center gap-3 text-left transition-all active:scale-95 cursor-pointer group"
+                >
+                  <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center font-bold flex-shrink-0 group-hover:scale-105 transition-transform">
+                    <Award className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <strong className="text-xs font-bold text-[#0A2540] block">Experience Cert</strong>
+                    <span className="text-[10px] text-slate-500">Generate &amp; Issue</span>
+                  </div>
+                </button>
+
+                {/* Action 6: Relieving Letter */}
+                <button
+                  onClick={() => openGenerateRelievingLetterModal()}
+                  className="bg-white border border-slate-200 hover:border-[#00C9A7] rounded-2xl p-3.5 shadow-xs flex items-center gap-3 text-left transition-all active:scale-95 cursor-pointer group"
+                >
+                  <div className="w-9 h-9 rounded-xl bg-teal-50 text-[#00A88B] flex items-center justify-center font-bold flex-shrink-0 group-hover:scale-105 transition-transform">
+                    <Briefcase className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <strong className="text-xs font-bold text-[#0A2540] block">Relieving Letter</strong>
+                    <span className="text-[10px] text-slate-500">Generate &amp; Seal</span>
+                  </div>
+                </button>
+
+                {/* Action 7: Invoice Generator */}
+                <button
+                  onClick={() => openGenerateInvoiceModal()}
+                  className="bg-white border border-slate-200 hover:border-[#00C9A7] rounded-2xl p-3.5 shadow-xs flex items-center gap-3 text-left transition-all active:scale-95 cursor-pointer group"
+                >
+                  <div className="w-9 h-9 rounded-xl bg-cyan-50 text-cyan-700 flex items-center justify-center font-bold flex-shrink-0 group-hover:scale-105 transition-transform">
+                    <Receipt className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <strong className="text-xs font-bold text-[#0A2540] block">Tax Invoice</strong>
+                    <span className="text-[10px] text-slate-500">Create &amp; Download</span>
+                  </div>
+                </button>
+
+                {/* Action 8: Schedule Video Call */}
+                <button
+                  onClick={() => setIsHrMeetingModalOpen(true)}
+                  className="bg-gradient-to-r from-blue-500/10 to-indigo-500/10 border-2 border-blue-400 hover:border-blue-600 rounded-2xl p-3.5 shadow-xs flex items-center gap-3 text-left transition-all active:scale-95 cursor-pointer group col-span-2"
+                >
+                  <div className="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold flex-shrink-0 group-hover:scale-105 transition-transform shadow-xs">
+                    <Video className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between">
+                      <strong className="text-xs font-black text-[#0A2540] block">Schedule Video Call</strong>
+                      <span className="text-[9px] font-black uppercase bg-blue-100 text-blue-800 px-2 py-0.5 rounded font-mono">
+                        Live Room
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-500 block truncate mt-0.5">1-on-1 with employee, all TLs, or company floor with Super Admin invite</span>
+                  </div>
+                </button>
+
+              </div>
+            </div>
+
+            {/* Today's Attendance Exceptions & Late Arrivals Radar */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="font-display font-bold text-sm text-[#0A2540] flex items-center gap-1.5">
+                  <AlertCircle className="w-4 h-4 text-amber-500" />
+                  <span>Today's Attendance Exceptions</span>
+                </h3>
+                <button 
+                  onClick={() => setActiveHrNav('attendance')}
+                  className="text-[11px] font-bold text-[#00A88B] hover:text-[#0A2540] transition-colors flex items-center gap-0.5"
+                >
+                  <span>Open Register</span>
+                  <span>→</span>
+                </button>
+              </div>
+
+              <div className="bg-white border border-slate-200 rounded-3xl p-4 shadow-sm space-y-3">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                  <span className="text-xs font-bold text-[#0A2540] block">
+                    Punctuality &amp; Leaves Log
+                  </span>
+                  <span className="text-[10px] font-bold font-mono px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                    Floor Cutoff: 09:30 AM
+                  </span>
+                </div>
+
+                {lateEmployees.length === 0 && onLeaveEmployees.length === 0 ? (
+                  <div className="bg-emerald-50/70 border border-emerald-200/80 rounded-2xl p-4 text-center text-xs font-bold text-emerald-800 flex items-center justify-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    <span>All clocked-in staff arrived on time today. Zero punctuality flags!</span>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {/* Late Arrival Items */}
+                    {lateEmployees.map((emp) => (
+                      <div
+                        key={emp.id}
+                        onClick={() => {
+                          setAttendanceFilter('LATE');
+                          setActiveHrNav('attendance');
+                        }}
+                        className="bg-amber-50/60 border border-amber-200/80 hover:border-amber-400 rounded-2xl p-2.5 flex items-center justify-between cursor-pointer transition-all active:scale-[0.99] group"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center font-bold text-xs flex-shrink-0 overflow-hidden">
+                            <EmployeeAvatar
+                              avatar={emp.avatar}
+                              name={emp.name}
+                              className="w-full h-full"
+                              fallbackClassName="font-bold text-xs"
+                            />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <strong className="text-xs font-bold text-[#0A2540] truncate group-hover:text-amber-800 transition-colors">
+                                {emp.name}
+                              </strong>
+                              <span className="text-[9px] font-bold text-slate-500 bg-white px-1.5 py-0.2 rounded border border-slate-200">
+                                {emp.group}
+                              </span>
+                            </div>
+                            <span className="text-[10px] text-amber-700 font-mono flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-amber-500" />
+                              Checked in: {emp.checkInTime || '09:42 AM'} (Late Flag)
+                            </span>
+                          </div>
+                        </div>
+
+                        <span className="text-[10px] font-bold text-amber-800 bg-white border border-amber-200 px-2 py-1 rounded-xl shadow-2xs group-hover:bg-amber-500 group-hover:text-white transition-colors flex-shrink-0">
+                          Review →
+                        </span>
+                      </div>
+                    ))}
+
+                    {/* On-Leave Items */}
+                    {onLeaveEmployees.map((emp) => (
+                      <div
+                        key={emp.id}
+                        onClick={() => {
+                          setAttendanceFilter('ON_LEAVE');
+                          setActiveHrNav('attendance');
+                        }}
+                        className="bg-purple-50/60 border border-purple-200/80 hover:border-purple-400 rounded-2xl p-2.5 flex items-center justify-between cursor-pointer transition-all active:scale-[0.99] group"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-800 flex items-center justify-center font-bold text-xs flex-shrink-0 overflow-hidden">
+                            <EmployeeAvatar
+                              avatar={emp.avatar}
+                              name={emp.name}
+                              className="w-full h-full"
+                              fallbackClassName="font-bold text-xs"
+                            />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <strong className="text-xs font-bold text-[#0A2540] truncate group-hover:text-purple-800 transition-colors">
+                                {emp.name}
+                              </strong>
+                              <span className="text-[9px] font-bold text-slate-500 bg-white px-1.5 py-0.2 rounded border border-slate-200">
+                                {emp.group}
+                              </span>
+                            </div>
+                            <span className="text-[10px] text-purple-700 font-medium">
+                              Approved Leave for Today
+                            </span>
+                          </div>
+                        </div>
+
+                        <span className="text-[10px] font-bold text-purple-800 bg-white border border-purple-200 px-2 py-1 rounded-xl shadow-2xs group-hover:bg-purple-600 group-hover:text-white transition-colors flex-shrink-0">
+                          Inspect →
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Official Offer Letters Feed */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="font-display font-bold text-sm text-[#0A2540] flex items-center gap-1.5">
+                  <span>Official Offer Letters ({offerLetters.length})</span>
+                </h3>
+                <button
+                  onClick={() => setIsGenerateOfferLetterModalOpen(true)}
+                  className="text-[11px] font-bold text-[#00A88B] hover:underline"
+                >
+                  + Generate New
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                {offerLetters.filter((letter) => {
+                  // Hide orphaned offer letters from deleted employees
+                  if (!letter.candidateName) return true;
+                  return activeEmpNames.has(letter.candidateName.toLowerCase());
+                }).map((letter) => (
+                  <div 
+                    key={letter.id} 
+                    onClick={() => {
+                      setSelectedOfferLetter(letter);
+                      setIsOfferLetterModalOpen(true);
+                    }}
+                    className="bg-white p-3.5 rounded-2xl border border-slate-200 hover:border-teal-400 shadow-xs flex items-center justify-between text-xs cursor-pointer transition-all active:scale-98"
+                  >
+                    <div className="space-y-0.5">
+                      <strong className="font-bold text-[#0A2540] block">{letter.candidateName}</strong>
+                      <p className="text-[11px] text-slate-500 font-medium">
+                        {letter.roleTitle} • CTC: <span className="font-bold text-slate-700">₹{(letter.annualCtc ?? 0).toLocaleString('en-IN')}</span>
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono text-slate-400">
+                        {letter.issuedDate}
+                      </span>
+                      <ChevronRight className="w-4 h-4 text-slate-400" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* --- TAB 2: DEDICATED DAILY ATTENDANCE & PUNCH REGISTER --- */}
+        {activeHrNav === 'attendance' && (
+          <div className="space-y-3 animate-in fade-in duration-150">
+            {/* Header: Just Attendance Heading & Compact Export Button */}
+            <div className="flex items-center justify-between pt-0.5">
+              <h2 className="font-display font-black text-xl text-[#0A2540]">Attendance</h2>
+              <button
+                onClick={exportHrReportCSV}
+                className="flex items-center gap-1.5 text-xs font-bold text-[#00A88B] bg-[#E6FAF6] px-2.5 py-1.5 rounded-xl border border-[#00C9A7]/40 hover:bg-[#00C9A7] hover:text-[#0A2540] transition-colors cursor-pointer shadow-2xs"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export</span>
+              </button>
+            </div>
+
+            {/* Date-Wise Selector for HR Attendance */}
+            <div className="flex items-center justify-between gap-2.5 bg-slate-50/80 p-2.5 rounded-2xl border border-slate-200/80">
+              <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-2xs">
+                <Calendar className="w-4 h-4 text-[#00C9A7]" />
+                <span className="text-xs font-bold text-slate-500">Date:</span>
+                <input
+                  type="date"
+                  value={selectedAttendanceDate}
+                  max={todayYMD}
+                  onChange={(e) => setSelectedAttendanceDate(e.target.value)}
+                  className="text-xs font-bold text-[#0A2540] bg-transparent focus:outline-none cursor-pointer"
+                />
+              </div>
+              {selectedAttendanceDate !== todayYMD && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedAttendanceDate(todayYMD)}
+                  className="text-xs font-bold px-3 py-1.5 rounded-xl bg-[#00C9A7]/20 text-[#00897B] hover:bg-[#00C9A7]/30 transition-all cursor-pointer shadow-2xs"
+                >
+                  Back to Today
+                </button>
+              )}
+            </div>
+
+            {/* Compact 2x2 Attendance Action Filter Buttons (Just Name & Numbers, No Icons) */}
+            <div className="grid grid-cols-2 gap-2">
+              {/* Tile 1: Present */}
+              <button
+                type="button"
+                onClick={() => setAttendanceFilter('PRESENT')}
+                className={`rounded-2xl py-2.5 px-3.5 shadow-2xs transition-all active:scale-95 cursor-pointer flex items-center justify-between ${
+                  attendanceFilter === 'PRESENT'
+                    ? 'bg-emerald-50/70 border-2 border-[#00C9A7] shadow-xs'
+                    : 'bg-white border border-slate-200/90 hover:border-[#00C9A7]'
+                }`}
+              >
+                <span className="text-xs font-bold text-[#0A2540]">Present</span>
+                <span className={`text-base font-black font-display ${attendanceFilter === 'PRESENT' ? 'text-[#00A88B]' : 'text-slate-800'}`}>
+                  {presentCount}
+                </span>
+              </button>
+
+              {/* Tile 2: Late */}
+              <button
+                type="button"
+                onClick={() => setAttendanceFilter('LATE')}
+                className={`rounded-2xl py-2.5 px-3.5 shadow-2xs transition-all active:scale-95 cursor-pointer flex items-center justify-between ${
+                  attendanceFilter === 'LATE'
+                    ? 'bg-amber-50/70 border-2 border-amber-400 shadow-xs'
+                    : 'bg-white border border-slate-200/90 hover:border-amber-400'
+                }`}
+              >
+                <span className="text-xs font-bold text-[#0A2540]">Late</span>
+                <span className={`text-base font-black font-display ${attendanceFilter === 'LATE' ? 'text-amber-600' : 'text-slate-800'}`}>
+                  {lateCount}
+                </span>
+              </button>
+
+              {/* Tile 3: On Leave */}
+              <button
+                type="button"
+                onClick={() => setAttendanceFilter('ON_LEAVE')}
+                className={`rounded-2xl py-2.5 px-3.5 shadow-2xs transition-all active:scale-95 cursor-pointer flex items-center justify-between ${
+                  attendanceFilter === 'ON_LEAVE'
+                    ? 'bg-purple-50/70 border-2 border-purple-400 shadow-xs'
+                    : 'bg-white border border-slate-200/90 hover:border-purple-400'
+                }`}
+              >
+                <span className="text-xs font-bold text-[#0A2540]">On Leave</span>
+                <span className={`text-base font-black font-display ${attendanceFilter === 'ON_LEAVE' ? 'text-purple-600' : 'text-slate-800'}`}>
+                  {onLeaveCount}
+                </span>
+              </button>
+
+              {/* Tile 4: All */}
+              <button
+                type="button"
+                onClick={() => setAttendanceFilter('ALL')}
+                className={`rounded-2xl py-2.5 px-3.5 shadow-2xs transition-all active:scale-95 cursor-pointer flex items-center justify-between ${
+                  attendanceFilter === 'ALL'
+                    ? 'bg-slate-100 border-2 border-[#0A2540] shadow-xs'
+                    : 'bg-white border border-slate-200/90 hover:border-slate-400'
+                }`}
+              >
+                <span className="text-xs font-bold text-[#0A2540]">All</span>
+                <span className={`text-base font-black font-display ${attendanceFilter === 'ALL' ? 'text-[#0A2540]' : 'text-slate-800'}`}>
+                  {totalEmployees}
+                </span>
+              </button>
+            </div>
+
+            {/* Search Bar */}
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search by employee name, code, or squad..."
+                className="w-full pl-10 pr-10 py-2.5 bg-white border border-slate-200 rounded-2xl text-xs focus:outline-none focus:border-[#00C9A7] shadow-2xs placeholder:text-slate-400"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="w-5 h-5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center text-[10px] font-bold absolute right-3 top-1/2 -translate-y-1/2 transition-colors"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Attendance Register Roster (Image 1 Squircle Container & Full Content) */}
+            <div className="space-y-3">
+              {filteredMembers.map((member) => {
+                const ev = evaluateMemberAttendanceForDate(
+                  member,
+                  selectedAttendanceDate,
+                  attendanceLogs,
+                  leaveRequests,
+                  calendarSettings,
+                  weeklyOffDays,
+                  companyHolidays
+                );
+                const isPresent = ev.status === 'PRESENT';
+                const isLate = ev.status === 'LATE';
+                const isLeave = ev.status === 'ON_LEAVE';
+
+                // Image 1 Squircle Container Style Matching
+                const squircleContainerStyle = isPresent
+                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/80'
+                  : isLate
+                  ? 'bg-amber-50 text-amber-700 border border-amber-200/80'
+                  : isLeave
+                  ? 'bg-purple-50 text-purple-700 border border-purple-200/80'
+                  : 'bg-rose-50 text-rose-700 border border-rose-200/80';
+
+                const rec = ev.record || attendanceLogs.find((a) => (a.employeeId === member.id || a.employeeId === member.empCode) && normalizeDateToYMD(a.date) === selectedAttendanceDate);
+
+                return (
+                  <div
+                    key={member.id}
+                    onClick={() => setSelectedEmployeeFor360(member)}
+                    className="bg-white border border-slate-200/90 hover:border-[#00C9A7] rounded-2xl p-4 shadow-xs hover:shadow-md transition-all cursor-pointer active:scale-[0.99] group flex flex-col gap-3"
+                  >
+                    {/* Top Row: Image 1 Squircle Avatar + Name/Squad + Premium Status Pill */}
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-3 min-w-0">
+                        {/* Image 1 Squircle Container with Live Status Badge */}
+                        <div className="relative flex-shrink-0">
+                          <div className={`w-12 h-12 rounded-2xl ${squircleContainerStyle} flex items-center justify-center font-black text-sm shadow-2xs group-hover:scale-105 transition-transform overflow-hidden`}>
+                            <EmployeeAvatar avatar={member.avatar} name={member.name} className="w-full h-full" fallbackClassName="font-black text-sm" />
+                          </div>
+                          {/* Corner micro-indicator */}
+                          <span
+                            className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                              isPresent ? 'bg-emerald-500' : isLate ? 'bg-amber-500' : isLeave ? 'bg-purple-500' : 'bg-rose-500'
+                            }`}
+                          />
+                        </div>
+
+                        {/* Name & Identity */}
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h4 className="text-sm font-bold text-[#0A2540] group-hover:text-[#00A88B] transition-colors truncate">
+                              {member.name}
+                            </h4>
+                            <span className="text-[10px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-lg border border-slate-200/80 truncate">
+                              {member.group || 'Inside Sales'}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-400 font-mono mt-0.5 truncate">
+                            {member.empCode} • {member.role ? member.role.replace(/telecaller/gi, 'Sales Executive') : 'Sales Executive'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Status Badge Pill */}
+                      <span
+                        className={`px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider whitespace-nowrap flex-shrink-0 flex items-center gap-1.5 shadow-2xs ${
+                          isPresent
+                            ? 'bg-[#E6FAF6] text-[#00A88B] border border-[#00C9A7]/40'
+                            : isLate
+                            ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                            : isLeave
+                            ? 'bg-purple-50 text-purple-800 border border-purple-200'
+                            : 'bg-rose-50 text-rose-700 border border-rose-200'
+                        }`}
+                      >
+                        {isPresent && <span className="w-1.5 h-1.5 rounded-full bg-[#00C9A7] animate-pulse" />}
+                        {isLate && <Clock className="w-3 h-3 text-amber-600" />}
+                        {isLeave && <Calendar className="w-3 h-3 text-purple-600" />}
+                        <span>{ev.badgeLabel}</span>
+                      </span>
+                    </div>
+
+                    {/* Middle: Full Content Punch Details Box (Punch In & Punch Out) */}
+                    <div className="bg-slate-50/80 border border-slate-100 rounded-xl p-2.5 space-y-1.5 text-xs">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Clock className={`w-3.5 h-3.5 flex-shrink-0 ${isLate ? 'text-amber-500' : isPresent ? 'text-[#00A88B]' : 'text-purple-500'}`} />
+                        <span className="font-semibold text-slate-700 font-mono text-[11px] truncate">
+                          {isLeave
+                            ? `Approved Leave: ${ev.leave?.leaveType || 'Leave'} (${ev.leave?.fromDate || ''} - ${ev.leave?.toDate || ''})`
+                            : (rec?.checkIn || ev.checkIn || (selectedAttendanceDate === todayYMD ? member.checkInTime : undefined))
+                            ? `Punch In: ${rec?.checkIn || ev.checkIn || member.checkInTime} ${isLate ? `(Late Flag • ${ev.lateMinutes || 0}m Late)` : '(On Time)'}`
+                            : 'Punch In: Not Logged'}
+                        </span>
+                      </div>
+
+                      {!isLeave && (
+                        <div className="flex items-center justify-between pt-1 border-t border-slate-200/50 text-[11px]">
+                          <div className="flex items-center gap-1.5 text-slate-600 font-mono">
+                            <LogOut className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                            <span>
+                              {rec?.checkOut || member.checkOutTime ? (
+                                <>Punch Out: <strong className="text-slate-800">{rec?.checkOut || member.checkOutTime}</strong></>
+                              ) : (rec?.checkIn || member.checkInTime) ? (
+                                <span className="text-emerald-700 font-bold flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                  Active on Floor (Not Punched Out)
+                                </span>
+                              ) : (
+                                'Punch Out: —'
+                              )}
+                            </span>
+                          </div>
+                          {rec?.workHours && (
+                            <span className="font-mono font-bold text-teal-700 text-[10px] bg-teal-50 px-1.5 py-0.5 rounded border border-teal-100">
+                              {rec.workHours}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Full Content: 3-Stat Matrix (Floor Productivity & Output) */}
+                    <div className="grid grid-cols-3 gap-2 bg-slate-50/60 p-2 rounded-xl border border-slate-100 text-center">
+                      <div className="bg-white rounded-lg py-1.5 px-1 shadow-2xs border border-slate-100/90">
+                        <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Calls Today</span>
+                        <strong className="text-xs font-mono font-black text-[#0A2540]">{member.dialsToday || 0} dials</strong>
+                      </div>
+                      <div className="bg-white rounded-lg py-1.5 px-1 shadow-2xs border border-slate-100/90">
+                        <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Connected</span>
+                        <strong className="text-xs font-mono font-black text-slate-700">{member.connected || Math.round((member.dialsToday || 0) * 0.42)} leads</strong>
+                      </div>
+                      <div className="bg-white rounded-lg py-1.5 px-1 shadow-2xs border border-slate-100/90">
+                        <span className="text-[9px] text-emerald-600 block font-bold uppercase tracking-wider">Sales Won</span>
+                        <strong className="text-xs font-mono font-black text-[#00A88B]">{formatInLakhs(member.salesAchieved || 0)}</strong>
+                      </div>
+                    </div>
+
+                    {/* Bottom: Contact & 360 Profile link */}
+                    <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100">
+                      <span className="text-[11px] text-slate-400 font-mono">
+                        📞 {member.phone || '+91 98765 43210'}
+                      </span>
+                      <span className="text-[11px] font-bold text-[#00A88B] group-hover:text-[#0A2540] transition-colors flex items-center gap-1">
+                        <span>Inspect 360 Profile</span>
+                        <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {filteredMembers.length === 0 && (
+                <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-xs text-slate-400 font-semibold shadow-xs">
+                  Nobody matches this attendance filter or search query.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* --- TAB 3: TEAMS & EMPLOYEES HIERARCHY --- */}
+        {activeHrNav === 'employees' && (
+          <div className="space-y-3.5 animate-in fade-in duration-150">
+            {/* If a team is selected -> LEVEL 2: THAT TEAM'S EMPLOYEES */}
+            {/* If a team is selected -> LEVEL 2: THAT TEAM'S EMPLOYEES */}
+            {selectedTeamGroup ? (
+              <div className="space-y-3 animate-in fade-in duration-150">
+                {/* Team Header Box with Integrated Compact Back Button (No wasted top space) */}
+                <div className="bg-white border border-slate-200/90 shadow-xs rounded-2xl p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <button
+                        onClick={() => setSelectedTeamGroup(null)}
+                        className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-[#00C9A7] text-slate-700 hover:text-[#0A2540] flex items-center justify-center transition-all active:scale-95 cursor-pointer flex-shrink-0 shadow-2xs"
+                        title="Back to All Teams"
+                      >
+                        <ArrowLeft className="w-4 h-4 stroke-[2.5]" />
+                      </button>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <h3 className="font-display font-black text-sm text-[#0A2540] uppercase truncate">
+                            {selectedTeamGroup.name}
+                          </h3>
+                          <span className="text-[9px] font-bold text-slate-600 bg-slate-100 px-1.5 py-0.2 rounded-md truncate">
+                            TL: {selectedTeamGroup.leaderName || 'Unassigned'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {(() => {
+                      const teamEmps = teamMembers.filter(m => isMemberOfSquad(m, selectedTeamGroup.name));
+                      const teamPresent = teamEmps.filter(m => m.attendanceStatus === 'PRESENT').length;
+                      return (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#E6FAF6] text-[#00A88B] border border-[#00C9A7]/30 whitespace-nowrap flex-shrink-0">
+                          {teamPresent}/{teamEmps.length} Present
+                        </span>
+                      );
+                    })()}
+                  </div>
+
+                  <div className="h-px bg-slate-100" />
+
+                  {/* 4 Metric Columns for this team */}
+                  {(() => {
+                    const teamEmps = teamMembers.filter(m => isMemberOfSquad(m, selectedTeamGroup.name));
+                    const teamMemberNames = new Set(teamEmps.map(m => (m.name || '').trim().toLowerCase()));
+                    const teamTodayPayments = verifiedPayments.filter(
+                      p => (p.timestamp || '').slice(0, 10) === todayYMD && teamMemberNames.has((p.telecallerName || '').trim().toLowerCase())
+                    );
+                    const teamDials = teamEmps.reduce((s, m) => s + (m.dialsToday || 0), 0);
+                    const teamGoals = teamEmps.reduce((s, m) => s + (m.goalCalls || 0), 0);
+                    const teamWon = teamTodayPayments.length;
+                    const teamRev = teamTodayPayments.reduce((s, p) => s + (p.dealAmount || 0), 0);
+                    const teamPresent = teamEmps.filter(m => m.attendanceStatus === 'PRESENT').length;
+                    const teamLate = teamEmps.filter(m => m.attendanceStatus === 'LATE').length;
+                    const teamLeave = teamEmps.filter(m => m.attendanceStatus === 'ON_LEAVE').length;
+
+                    return (
+                      <>
+                        <div className="grid grid-cols-4 gap-1 text-center divide-x divide-slate-100">
+                          <div className="px-1">
+                            <strong className="text-base font-display font-black text-[#0A2540] block leading-tight">
+                              {teamEmps.length}
+                            </strong>
+                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                              Team
+                            </span>
+                          </div>
+
+                          <div className="px-1">
+                            <strong className="text-base font-display font-black text-[#0A2540] block leading-tight">
+                              <span className="text-[#00A88B]">{teamDials}</span>
+                              <span className="text-slate-300 font-normal text-xs">/{teamGoals}</span>
+                            </strong>
+                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                              Calls
+                            </span>
+                          </div>
+
+                          <div className="px-1">
+                            <strong className="text-base font-display font-black text-purple-700 block leading-tight">
+                              {teamWon}
+                            </strong>
+                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                              Won
+                            </span>
+                          </div>
+
+                          <div className="px-1">
+                            <strong className="text-base font-display font-black text-[#00A88B] block leading-tight">
+                              {formatInLakhs(teamRev)}
+                            </strong>
+                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                              Today's Revenue
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Attendance Pill status with no awkward wrapping */}
+                        <div className="bg-[#E6FAF6] border border-[#00C9A7]/20 text-[#00897B] font-bold text-[10px] px-2.5 py-1 rounded-xl text-center flex items-center justify-center gap-2 whitespace-nowrap">
+                          <span>{teamPresent} Present</span>
+                          <span>•</span>
+                          <span>{teamLate} Late</span>
+                          <span>•</span>
+                          <span>{teamLeave} Leave</span>
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+
+                {/* Search within this team */}
+                <div className="relative">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input 
+                    type="text" 
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder={`Search in ${selectedTeamGroup.name}...`}
+                    className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-[#00C9A7]"
+                  />
+                </div>
+
+                {/* Filter Pills for this team */}
+                {(() => {
+                  const teamEmps = teamMembers.filter(m => isMemberOfSquad(m, selectedTeamGroup.name));
+                  const pCount = teamEmps.filter(m => m.attendanceStatus === 'PRESENT').length;
+                  const lCount = teamEmps.filter(m => m.attendanceStatus === 'LATE').length;
+                  const oCount = teamEmps.filter(m => m.attendanceStatus === 'ON_LEAVE').length;
+
+                  return (
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar">
+                      <button
+                        type="button"
+                        onClick={() => setAttendanceFilter('ALL')}
+                        className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap active:scale-95 cursor-pointer ${
+                          attendanceFilter === 'ALL'
+                            ? 'bg-[#0A2540] text-white shadow-xs'
+                            : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        All ({teamEmps.length})
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setAttendanceFilter('PRESENT')}
+                        className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap active:scale-95 cursor-pointer ${
+                          attendanceFilter === 'PRESENT'
+                            ? 'bg-[#0A2540] text-white shadow-xs'
+                            : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        Present ({pCount})
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setAttendanceFilter('LATE')}
+                        className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap active:scale-95 cursor-pointer ${
+                          attendanceFilter === 'LATE'
+                            ? 'bg-[#0A2540] text-white shadow-xs'
+                            : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        Late ({lCount})
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setAttendanceFilter('ON_LEAVE')}
+                        className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap active:scale-95 cursor-pointer ${
+                          attendanceFilter === 'ON_LEAVE'
+                            ? 'bg-[#0A2540] text-white shadow-xs'
+                            : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        Leave ({oCount})
+                      </button>
+                    </div>
+                  );
+                })()}
+
+                {/* Team's Employees List */}
+                <div className="space-y-3">
+                  {teamMembers
+                    .filter(m => isMemberOfSquad(m, selectedTeamGroup.name))
+                    .filter(m => {
+                      const matchSearch =
+                        m.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                        m.empCode.toLowerCase().includes(searchQuery.toLowerCase());
+                      const matchFilter =
+                        attendanceFilter === 'ALL' || m.attendanceStatus === attendanceFilter;
+                      return matchSearch && matchFilter;
+                    })
+                    .map((member) => {
+                      const isPresent = member.attendanceStatus === 'PRESENT';
+                      const isLate = member.attendanceStatus === 'LATE';
+
+                      const squircleStyle = isPresent
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/80'
+                        : isLate
+                        ? 'bg-amber-50 text-amber-700 border border-amber-200/80'
+                        : 'bg-purple-50 text-purple-700 border border-purple-200/80';
+
+                      return (
+                        <div 
+                          key={member.id}
+                          onClick={() => setSelectedEmployeeFor360(member)}
+                          className="bg-white border border-slate-200/90 hover:border-[#00C9A7] rounded-2xl p-3.5 shadow-xs hover:shadow-md flex flex-col gap-2.5 cursor-pointer active:scale-[0.98] transition-all group"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="relative flex-shrink-0">
+                                <div className={`w-11 h-11 rounded-2xl ${squircleStyle} flex items-center justify-center font-display font-black text-xs shadow-2xs group-hover:scale-105 transition-transform overflow-hidden`}>
+                                  <EmployeeAvatar avatar={member.avatar} name={member.name} className="w-full h-full" fallbackClassName="font-display font-black text-xs" />
+                                </div>
+                                <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                                  isPresent ? 'bg-emerald-500' : isLate ? 'bg-amber-500' : 'bg-purple-500'
+                                }`} />
+                              </div>
+
+                              <div>
+                                <strong className="text-xs font-bold text-[#0A2540] group-hover:text-[#00A88B] transition-colors block">
+                                  {member.name}
+                                </strong>
+                                <span className="text-[10px] text-slate-400 font-mono">
+                                  {member.empCode} • {member.role ? member.role.replace(/telecaller/gi, 'Sales Executive') : 'Sales Executive'}
+                                </span>
+                              </div>
+                            </div>
+
+                            <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider ${
+                              isPresent ? 'bg-emerald-100/90 text-emerald-800 border border-emerald-200/80' :
+                              isLate ? 'bg-amber-100/90 text-amber-800 border border-amber-200/80' :
+                              member.attendanceStatus === 'ON_LEAVE' ? 'bg-purple-100/90 text-purple-800 border border-purple-200/80' :
+                              member.attendanceStatus === 'WEEKLY_OFF' ? 'bg-slate-100 text-slate-700 border border-slate-200' :
+                              member.attendanceStatus === 'HOLIDAY' ? 'bg-indigo-100 text-indigo-800 border border-indigo-200' :
+                              'bg-rose-100/90 text-rose-800 border border-rose-200/80'
+                            }`}>
+                              {member.attendanceStatus.replace('_', ' ')}
+                            </span>
+                          </div>
+
+                          {/* 3 Metric Matrix */}
+                          <div className="grid grid-cols-3 gap-2 bg-slate-50/70 p-1.5 rounded-xl border border-slate-100 text-center">
+                            <div className="bg-white rounded-lg py-1 px-1 shadow-2xs border border-slate-100/90">
+                              <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Dials</span>
+                              <strong className="text-xs font-mono font-black text-[#0A2540]">{member.dialsToday}</strong>
+                            </div>
+                            <div className="bg-white rounded-lg py-1 px-1 shadow-2xs border border-slate-100/90">
+                              <span className="text-[9px] text-emerald-600 block font-bold uppercase tracking-wider">Sales</span>
+                              <strong className="text-xs font-mono font-black text-[#00A88B]">{formatInLakhs(member.salesAchieved)}</strong>
+                            </div>
+                            <div className="bg-white rounded-lg py-1 px-1 shadow-2xs border border-slate-100/90">
+                              <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Interested</span>
+                              <strong className="text-xs font-mono font-black text-slate-700">{member.interested || 0}</strong>
+                            </div>
+                          </div>
+
+                          {/* Footer */}
+                          <div className="flex items-center justify-between text-[10px] pt-1.5 border-t border-slate-100">
+                            <span className="text-slate-500 font-mono flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-slate-400" />
+                              In: {member.checkInTime || 'Not Punched'}
+                            </span>
+                            <span className="px-2.5 py-1 rounded-xl bg-slate-50 group-hover:bg-[#00C9A7] text-[#0A2540] font-bold transition-colors flex items-center gap-1 shadow-2xs">
+                              <span>View Profile</span>
+                              <span>→</span>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            ) : (
+              /* LEVEL 1: ALL TEAMS VIEW (DEFAULT) */
+              <div className="space-y-3.5 animate-in fade-in duration-150">
+                {/* Floor Pulse Box */}
+                <div className="bg-white border border-slate-200/90 shadow-xs rounded-2xl p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-xs font-black tracking-wider text-[#0A2540] uppercase truncate">
+                        Floor Pulse
+                      </span>
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />
+                    </div>
+                    <div className="bg-[#E6FAF6] border border-[#00C9A7]/30 text-[#00897B] font-bold text-[10px] px-2.5 py-0.5 rounded-full whitespace-nowrap flex-shrink-0">
+                      {presentCount} Present • {lateCount} Late • {onLeaveCount} Leave
+                    </div>
+                  </div>
+
+                  <div className="h-px bg-slate-100" />
+
+                  <div className="grid grid-cols-4 gap-1 text-center divide-x divide-slate-100">
+                    <div className="px-1">
+                      <strong className="text-base font-display font-black text-[#0A2540] block leading-tight">
+                        {teamGroups.length}
+                      </strong>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                        Teams
+                      </span>
+                    </div>
+
+                    <div className="px-1">
+                      <strong className="text-base font-display font-black text-[#0A2540] block leading-tight">
+                        <span className="text-[#00A88B]">{totalActivities}</span>
+                        <span className="text-slate-300 font-normal text-xs">/{totalGoalCalls}</span>
+                      </strong>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                        Calls
+                      </span>
+                    </div>
+
+                    <div className="px-1">
+                      <strong className="text-base font-display font-black text-purple-700 block leading-tight">
+                        {totalWonToday}
+                      </strong>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                        Won
+                      </span>
+                    </div>
+
+                    <div className="px-1">
+                      <strong className="text-base font-display font-black text-[#00A88B] block leading-tight">
+                        {formatInLakhs(todayVerifiedSales)}
+                      </strong>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-0.5">
+                        Today's Revenue
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Section Header */}
+                <div className="flex items-center justify-between px-1">
+                  <div>
+                    <h3 className="font-display font-black text-sm text-[#0A2540]">
+                      All Sales Teams ({teamGroups.length})
+                    </h3>
+                    <p className="text-[10px] text-slate-500">
+                      Tap a team to inspect employees, attendance &amp; daily calls
+                    </p>
+                  </div>
+                  <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+                    {totalEmployees} Total Staff
+                  </span>
+                </div>
+
+                {/* Teams List */}
+                <div className="space-y-3">
+                  {teamGroups.map((group) => {
+                    const groupMembers = teamMembers.filter(m => isMemberOfSquad(m, group.name));
+                    const groupMemberNames = new Set(groupMembers.map(m => (m.name || '').trim().toLowerCase()));
+                    const groupTodayPayments = verifiedPayments.filter(
+                      p => (p.timestamp || '').slice(0, 10) === todayYMD && groupMemberNames.has((p.telecallerName || '').trim().toLowerCase())
+                    );
+                    const groupPresent = groupMembers.filter(m => m.attendanceStatus === 'PRESENT').length;
+                    const groupLate = groupMembers.filter(m => m.attendanceStatus === 'LATE').length;
+                    const groupLeave = groupMembers.filter(m => m.attendanceStatus === 'ON_LEAVE').length;
+                    const groupDials = groupMembers.reduce((s, m) => s + (m.dialsToday || 0), 0);
+                    const groupTodaySales = groupTodayPayments.reduce((s, p) => s + (p.dealAmount || 0), 0);
+
+                    // Soft squircle styling based on squad type
+                    const isTeal = group.name.includes('HNI');
+                    const isBlue = group.name.includes('Inbound');
+                    const squircleStyle = isTeal
+                      ? 'bg-[#E6FAF6] text-[#00A88B] border border-[#00C9A7]/30'
+                      : isBlue
+                      ? 'bg-sky-50 text-sky-600 border border-sky-200/80'
+                      : 'bg-amber-50 text-amber-600 border border-amber-200/80';
+
+                    return (
+                      <div
+                        key={group.id}
+                        onClick={() => setSelectedTeamGroup(group)}
+                        className="bg-white border border-slate-200/90 hover:border-[#00C9A7] rounded-2xl p-4 shadow-xs hover:shadow-md cursor-pointer transition-all active:scale-[0.99] group space-y-3"
+                      >
+                        {/* Team Title & TL */}
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className={`w-11 h-11 rounded-2xl ${squircleStyle} flex items-center justify-center font-black text-sm shadow-2xs group-hover:scale-105 transition-transform flex-shrink-0`}>
+                              <Layers className="w-5 h-5 stroke-[2.2]" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <h4 className="font-display font-bold text-sm text-[#0A2540] group-hover:text-[#00A88B] transition-colors truncate">
+                                  {group.name}
+                                </h4>
+                                <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-lg border border-slate-200/60">
+                                  {groupMembers.length} Members
+                                </span>
+                              </div>
+                              <span className="text-xs text-slate-400 font-medium block mt-0.5 truncate">
+                                Team Leader: <strong className="text-slate-600 font-bold">{group.leaderName || 'Unassigned'}</strong>
+                              </span>
+                            </div>
+                          </div>
+
+                          <span className="px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider bg-[#E6FAF6] text-[#00A88B] border border-[#00C9A7]/30 whitespace-nowrap flex-shrink-0 shadow-2xs flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[#00C9A7] animate-pulse" />
+                            <span>{groupPresent}/{groupMembers.length} Present</span>
+                          </span>
+                        </div>
+
+                        {/* Team Stats Matrix */}
+                        <div className="grid grid-cols-3 gap-2 bg-slate-50/70 p-2 rounded-xl border border-slate-100 text-center">
+                          <div className="bg-white rounded-lg py-1 px-1 shadow-2xs border border-slate-100/90">
+                            <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Calls Today</span>
+                            <strong className="text-xs font-mono font-black text-[#0A2540]">{groupDials} calls</strong>
+                          </div>
+                          <div className="bg-white rounded-lg py-1 px-1 shadow-2xs border border-slate-100/90">
+                            <span className="text-[9px] text-emerald-600 block font-bold uppercase tracking-wider">Today's Sales</span>
+                            <strong className="text-xs font-mono font-black text-[#00A88B]">{formatInLakhs(groupTodaySales)}</strong>
+                          </div>
+                          <div className="bg-white rounded-lg py-1 px-1 shadow-2xs border border-slate-100/90">
+                            <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Attendance</span>
+                            <strong className="text-xs font-mono font-bold text-slate-700">
+                              {groupPresent}P • {groupLate}L • {groupLeave}O
+                            </strong>
+                          </div>
+                        </div>
+
+                        {/* Card Footer Premium App Action */}
+                        <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+                          <span className="text-[11px] text-slate-400 font-medium truncate max-w-[200px]">
+                            {group.description || 'High-velocity client engagement team'}
+                          </span>
+                          <span className="px-3 py-1.5 rounded-xl bg-slate-100 group-hover:bg-[#00C9A7] text-[#0A2540] font-bold text-xs flex items-center gap-1.5 transition-all shadow-2xs group-hover:shadow-xs group-hover:translate-x-0.5">
+                            <span>Open Squad</span>
+                            <ChevronRight className="w-3.5 h-3.5" />
+                          </span>
+                        </div>
+
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* --- TAB 3: APPROVALS & LEAVES --- */}
+        {activeHrNav === 'approvals' && (
+          <div className="space-y-4 animate-in fade-in duration-150">
+            {/* Executive Header with Apply Leave Button */}
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-display font-black text-xl text-[#0A2540]">
+                  HR Leaves & Sanctions
+                </h2>
+                <p className="text-xs text-slate-500">Apply for personal leave & audit floor attendance</p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsLeaveModalOpen(true)}
+                className="flex items-center gap-1.5 bg-[#00C9A7] hover:bg-[#00B4D8] text-[#0A2540] font-black text-xs px-3.5 py-2 rounded-xl shadow-xs active:scale-95 transition-all flex-shrink-0 cursor-pointer"
+              >
+                <Plus className="w-4 h-4 stroke-[3]" />
+                <span>Apply Leave</span>
+              </button>
+            </div>
+
+            {/* Segmented Mode Switcher: Team Approvals vs My Leaves */}
+            <div className="flex p-1 bg-slate-100 rounded-2xl border border-slate-200">
+              <button
+                type="button"
+                onClick={() => setLeaveSectionMode('approvals')}
+                className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  leaveSectionMode === 'approvals'
+                    ? 'bg-[#0A2540] text-white shadow-xs font-black'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Team Approvals</span>
+                {pendingLeaves.length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full text-[9px] font-mono font-black bg-rose-500 text-white ml-0.5">
+                    {pendingLeaves.length}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setLeaveSectionMode('my_leaves')}
+                className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  leaveSectionMode === 'my_leaves'
+                    ? 'bg-[#0A2540] text-white shadow-xs font-black'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                <span>My Leaves & Balance</span>
+                {myLeaves.filter(l => l.status === 'PENDING').length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full text-[9px] font-mono font-black bg-amber-500 text-white ml-0.5">
+                    {myLeaves.filter(l => l.status === 'PENDING').length}
+                  </span>
+                )}
+              </button>
+            </div>
+
+            {/* View Mode 1: Team Approvals (Floor Governance) */}
+            {leaveSectionMode === 'approvals' && (
+              <div className="space-y-4">
+                {/* Sleek Segmented Control with subtle color touches */}
+                <div className="bg-slate-100/90 p-1 rounded-xl flex items-center gap-1 border border-slate-200/60 shadow-2xs">
+              <button
+                onClick={() => setLeaveApprovalTab('PENDING')}
+                className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                  leaveApprovalTab === 'PENDING'
+                    ? 'bg-white text-[#0A2540] shadow-xs ring-1 ring-slate-200/70'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <span>Pending</span>
+                <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-md ${
+                  leaveApprovalTab === 'PENDING' 
+                    ? 'bg-amber-500 text-white font-bold shadow-2xs' 
+                    : 'bg-slate-200/80 text-slate-600'
+                }`}>
+                  {pendingLeaves.length}
+                </span>
+              </button>
+
+              <button
+                onClick={() => setLeaveApprovalTab('APPROVED')}
+                className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                  leaveApprovalTab === 'APPROVED'
+                    ? 'bg-white text-[#0A2540] shadow-xs ring-1 ring-slate-200/70'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <span>Approved</span>
+                <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-md ${
+                  leaveApprovalTab === 'APPROVED' 
+                    ? 'bg-[#00A88B] text-white font-bold shadow-2xs' 
+                    : 'bg-slate-200/80 text-slate-600'
+                }`}>
+                  {approvedLeaves.length}
+                </span>
+              </button>
+
+              <button
+                onClick={() => setLeaveApprovalTab('REJECTED')}
+                className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                  leaveApprovalTab === 'REJECTED'
+                    ? 'bg-white text-[#0A2540] shadow-xs ring-1 ring-slate-200/70'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <span>Rejected</span>
+                <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-md ${
+                  leaveApprovalTab === 'REJECTED' 
+                    ? 'bg-rose-500 text-white font-bold shadow-2xs' 
+                    : 'bg-slate-200/80 text-slate-600'
+                }`}>
+                  {rejectedLeaves.length}
+                </span>
+              </button>
+            </div>
+
+            {/* --- SECTION 1: PENDING QUEUE --- */}
+            {leaveApprovalTab === 'PENDING' && (
+              <div className="space-y-3">
+                {pendingLeaves.length === 0 ? (
+                  <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center space-y-2 shadow-xs">
+                    <div className="w-10 h-10 rounded-full bg-teal-50 text-[#00A88B] flex items-center justify-center mx-auto">
+                      <CheckCircle2 className="w-5 h-5" />
+                    </div>
+                    <h4 className="font-display font-bold text-sm text-[#0A2540]">All Clear</h4>
+                    <p className="text-xs text-slate-500 max-w-xs mx-auto">
+                      Zero pending leave requests. Floor attendance is fully accounted for.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {pendingLeaves.map((req, idx) => {
+                      const emp = teamMembers.find(m => m.name === req.employeeName || m.empCode === req.employeeCode);
+                      
+                      // Refined avatar gradients
+                      const avatarGradients = [
+                        'bg-gradient-to-tr from-[#00A88B] to-[#00C9A7]',
+                        'bg-gradient-to-tr from-indigo-600 to-sky-400',
+                        'bg-gradient-to-tr from-purple-600 to-pink-400',
+                        'bg-gradient-to-tr from-blue-600 to-cyan-400',
+                      ];
+                      const avatarGradient = avatarGradients[idx % avatarGradients.length];
+
+                      // Refined jewel-toned leave type tags
+                      const isSick = req.leaveType === 'Sick Leave';
+                      const isPaid = req.leaveType.includes('Earned') || req.leaveType.includes('Paid');
+                      const leaveBadgeStyle = isSick
+                        ? 'bg-rose-50 text-rose-800 border-rose-200/80'
+                        : isPaid
+                        ? 'bg-sky-50 text-sky-800 border-sky-200/80'
+                        : 'bg-amber-50 text-amber-800 border-amber-200/80';
+
+                      return (
+                        <div key={req.id} className="bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 shadow-xs space-y-2.5 transition-all">
+                          {/* Header: Gradient Avatar, Name, Group & Jewel Pill */}
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className={`w-10 h-10 rounded-full ${avatarGradient} text-white font-black text-xs flex items-center justify-center shadow-2xs flex-shrink-0 overflow-hidden`}>
+                                <EmployeeAvatar
+                                  avatar={emp?.avatar}
+                                  name={req.employeeName || 'Employee'}
+                                  className="w-full h-full rounded-full"
+                                  fallbackClassName="font-black text-xs"
+                                />
+                              </div>
+                              <div className="min-w-0">
+                                <h4 className="text-sm font-bold text-[#0A2540] truncate">
+                                  {req.employeeName || 'Employee'}
+                                </h4>
+                                <p className="text-xs text-slate-500 truncate">
+                                  <span className="font-mono text-slate-600">{req.employeeCode || emp?.empCode || 'TNX'}</span>
+                                  <span className="mx-1.5 text-slate-300">•</span>
+                                  <span>{emp?.group || 'Inside Sales Squad'}</span>
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Refined Jewel-Toned Leave Tag */}
+                            <span className={`text-xs font-semibold px-2.5 py-1 rounded-lg border whitespace-nowrap flex-shrink-0 ${leaveBadgeStyle}`}>
+                              {req.leaveType} • {req.totalDays}d
+                            </span>
+                          </div>
+
+                          {/* Date Range & 360 Profile link (Placed right above Reject button to save card height) */}
+                          <div className="flex items-center justify-between text-xs px-0.5">
+                            <div className="flex items-center gap-1.5 font-medium text-slate-700">
+                              <Calendar className="w-3.5 h-3.5 text-[#00A88B]" />
+                              <span>{req.fromDate} {req.toDate !== req.fromDate ? `– ${req.toDate}` : ''}</span>
+                            </div>
+                            {emp ? (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedEmployeeFor360(emp)}
+                                className="text-[11px] font-bold text-[#00A88B] hover:text-[#0A2540] inline-flex items-center gap-0.5 transition-colors cursor-pointer"
+                              >
+                                <span>View 360 Profile</span>
+                                <ChevronRight className="w-3 h-3" />
+                              </button>
+                            ) : (
+                              <span className="text-[11px] text-slate-400 font-mono">
+                                {req.appliedOn || 'Today'}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Refined Quote Box with Teal Accent Border */}
+                          <div className="border-l-[3px] border-[#00C9A7] bg-slate-50/60 pl-3 py-1.5 rounded-r-xl border-y border-r border-slate-100">
+                            <p className="text-xs text-slate-700 italic leading-relaxed">
+                              "{req.reason}"
+                            </p>
+                          </div>
+
+                          {/* Action Buttons: Signature Mint/Teal Gradient + Clean Outlined */}
+                          <div className="grid grid-cols-2 gap-2 pt-0.5">
+                            <button
+                              onClick={() => {
+                                approveLeaveRequest(req.id);
+                                triggerToast(`✓ Forwarded leave for ${req.employeeName || 'Employee'} to Admin`);
+                              }}
+                              className="py-2 rounded-xl bg-gradient-to-r from-[#00A88B] to-[#00C9A7] text-[#0A2540] font-black text-xs flex items-center justify-center gap-1.5 shadow-2xs hover:brightness-105 transition-all active:scale-98 cursor-pointer"
+                            >
+                              <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                              <span>Forward to Admin</span>
+                            </button>
+                            <button
+                              onClick={() => {
+                                rejectLeaveRequest(req.id, 'Shift coverage constraint');
+                                triggerToast(`✗ Rejected leave application for ${req.employeeName || 'Employee'}`);
+                              }}
+                              className="py-2 rounded-xl bg-white hover:bg-rose-50/60 border border-slate-200 hover:border-rose-200 text-slate-600 hover:text-rose-600 font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors active:scale-98 cursor-pointer"
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                              <span>Reject</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* --- SECTION 2: APPROVED LEAVES WITH SLEEK FILTER --- */}
+            {leaveApprovalTab === 'APPROVED' && (
+              <div className="space-y-3">
+                {/* Summary bar */}
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-xs font-bold text-[#0A2540]">
+                    {approvedLeaves.length} Approved Requests
+                  </span>
+                  <span className="text-xs text-slate-500">
+                    {totalApprovedDays} Days Total
+                  </span>
+                </div>
+
+                {/* Sleek Category Filter Pills */}
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+                  {[
+                    { id: 'ALL', label: 'All', count: approvedLeaves.length },
+                    { id: 'Casual Leave', label: 'Casual', count: approvedCasualCount },
+                    { id: 'Sick Leave', label: 'Sick', count: approvedSickCount },
+                    { id: 'Earned / Paid Leave', label: 'Paid', count: approvedEarnedCount },
+                  ].map((cat) => {
+                    const isActive = approvedCategoryFilter === cat.id;
+                    return (
+                      <button
+                        key={cat.id}
+                        onClick={() => setApprovedCategoryFilter(cat.id as any)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 cursor-pointer ${
+                          isActive
+                            ? 'bg-[#0A2540] text-white shadow-xs'
+                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200/70'
+                        }`}
+                      >
+                        <span>{cat.label}</span>
+                        <span className={`text-[10px] font-mono ${isActive ? 'text-slate-300' : 'text-slate-400'}`}>
+                          {cat.count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Approved Cards List */}
+                {displayedApprovedLeaves.length === 0 ? (
+                  <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center space-y-1 shadow-xs">
+                    <p className="text-xs font-bold text-[#0A2540]">No records in this category</p>
+                    <p className="text-[11px] text-slate-400">
+                      No approved leave applications match "{approvedCategoryFilter}".
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {displayedApprovedLeaves.map((req) => {
+                      const emp = teamMembers.find(m => m.name === req.employeeName || m.empCode === req.employeeCode);
+                      return (
+                        <div key={req.id} className="bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 shadow-xs space-y-3 transition-all">
+                          {/* Header */}
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-10 h-10 rounded-full bg-slate-100 text-[#0A2540] font-bold text-xs flex items-center justify-center border border-slate-200/60 flex-shrink-0 overflow-hidden">
+                                <EmployeeAvatar
+                                  avatar={emp?.avatar}
+                                  name={req.employeeName || 'Employee'}
+                                  className="w-full h-full rounded-full"
+                                  fallbackClassName="font-bold text-xs"
+                                />
+                              </div>
+                              <div className="min-w-0">
+                                <h4 className="text-sm font-bold text-[#0A2540] truncate">
+                                  {req.employeeName || 'Employee'}
+                                </h4>
+                                <p className="text-xs text-slate-500 truncate">
+                                  <span className="font-mono text-slate-600">{req.employeeCode || emp?.empCode || 'TNX'}</span>
+                                  <span className="mx-1.5 text-slate-300">•</span>
+                                  <span>{emp?.group || 'Inside Sales Squad'}</span>
+                                </p>
+                              </div>
+                            </div>
+                            <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200/80 flex items-center gap-1 flex-shrink-0">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                              <span>Approved</span>
+                            </span>
+                          </div>
+
+                          {/* Leave Specs */}
+                          <div className="flex items-center justify-between text-xs text-slate-600 px-0.5">
+                            <span className="font-semibold text-slate-800">
+                              {req.leaveType} • {req.totalDays}d
+                            </span>
+                            <span className="text-slate-500 flex items-center gap-1">
+                              <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                              <span>{req.fromDate} {req.toDate !== req.fromDate ? `– ${req.toDate}` : ''}</span>
+                            </span>
+                          </div>
+
+                          {/* Reason */}
+                          <div className="bg-slate-50 rounded-xl p-2.5 border border-slate-100">
+                            <p className="text-xs text-slate-600 italic">
+                              "{req.reason}"
+                            </p>
+                          </div>
+
+                          {/* Sanction Stamp & 360 link */}
+                          <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100">
+                            <span className="text-[11px] text-slate-500 font-medium">
+                              Sanctioned by {req.approvedBy || 'HR Admin'}
+                            </span>
+                            {emp && (
+                              <button
+                                onClick={() => setSelectedEmployeeFor360(emp)}
+                                className="text-[11px] font-semibold text-[#00A88B] hover:underline flex items-center gap-0.5"
+                              >
+                                <span>View 360</span>
+                                <ChevronRight className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* --- SECTION 3: REJECTED LEAVES --- */}
+            {leaveApprovalTab === 'REJECTED' && (
+              <div className="space-y-3">
+                {rejectedLeaves.length === 0 ? (
+                  <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center space-y-1 shadow-xs">
+                    <p className="text-xs font-bold text-[#0A2540]">No Rejected Requests</p>
+                    <p className="text-[11px] text-slate-400">
+                      There are currently zero rejected leave applications.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {rejectedLeaves.map((req) => {
+                      const emp = teamMembers.find(m => m.name === req.employeeName || m.empCode === req.employeeCode);
+                      return (
+                        <div key={req.id} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-2.5">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <strong className="text-sm font-bold text-[#0A2540] block">{req.employeeName || 'Employee'}</strong>
+                              <span className="text-xs text-slate-500">{req.leaveType} ({req.totalDays} Days)</span>
+                            </div>
+                            <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-rose-50 text-rose-700 border border-rose-200/80">
+                              Rejected
+                            </span>
+                          </div>
+
+                          <div className="bg-rose-50/50 p-2.5 rounded-xl border border-rose-100 text-xs text-rose-800">
+                            <strong>Note:</strong> {req.approvedBy || 'Operational requirements'}
+                          </div>
+
+                          {emp && (
+                            <div className="text-right pt-0.5">
+                              <button
+                                onClick={() => setSelectedEmployeeFor360(emp)}
+                                className="text-[11px] font-semibold text-slate-600 hover:underline inline-flex items-center gap-1"
+                              >
+                                <span>Inspect Employee 360</span>
+                                <ChevronRight className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+              </div>
+            )}
+
+            {/* View Mode 2: HR Personal Leaves & Balance (Sent directly to Super Admin) */}
+            {leaveSectionMode === 'my_leaves' && (
+              <div className="space-y-4 animate-in fade-in duration-200">
+                {/* Annual Leave Balance Card */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="font-display font-black text-sm text-[#0A2540]">Annual Leave Balance</h4>
+                      <p className="text-[11px] text-slate-500 font-medium">
+                        {profile.totalLeaveBalance || 18} Days Available for 2026
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsLeaveModalOpen(true)}
+                      className="text-[#00A88B] text-xs font-bold hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <span>+ Apply Now</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 text-center">
+                      <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Casual</span>
+                      <strong className="text-xs font-mono font-black text-[#0A2540]">
+                        {(profile as any).leaveBalances?.['Casual Leave'] ?? 8} / 12
+                      </strong>
+                    </div>
+
+                    <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 text-center">
+                      <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Sick</span>
+                      <strong className="text-xs font-mono font-black text-[#0A2540]">
+                        {(profile as any).leaveBalances?.['Sick Leave'] ?? 6} / 8
+                      </strong>
+                    </div>
+
+                    <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 text-center">
+                      <span className="text-[9px] text-slate-400 block font-bold uppercase tracking-wider">Earned / Paid</span>
+                      <strong className="text-xs font-mono font-black text-[#0A2540]">
+                        {(profile as any).leaveBalances?.['Earned / Paid Leave'] ?? 4} / 6
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* List of Applied Personal Leaves */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-bold text-xs text-[#0A2540]">My Leave Application History</h4>
+                    <span className="text-[11px] text-slate-500 font-medium">{myLeaves.length} records</span>
+                  </div>
+
+                  {myLeaves.length === 0 ? (
+                    <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center space-y-3 shadow-2xs">
+                      <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 mx-auto flex items-center justify-center">
+                        <Calendar className="w-6 h-6" />
+                      </div>
+                      <p className="text-xs font-bold text-slate-700">No personal leaves submitted yet</p>
+                      <p className="text-[11px] text-slate-400 max-w-xs mx-auto">
+                        When you apply for leave, your application will route directly to the Super Admin for sign-off.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setIsLeaveModalOpen(true)}
+                        className="px-4 py-2 bg-[#00C9A7] text-[#0A2540] text-xs font-black rounded-xl shadow-xs cursor-pointer active:scale-95 transition-all inline-flex items-center gap-1.5"
+                      >
+                        <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                        <span>Apply for Leave</span>
+                      </button>
+                    </div>
+                  ) : (
+                    myLeaves.map((leave) => {
+                      const isPending = leave.status === 'PENDING';
+                      const isApproved = leave.status === 'APPROVED';
+                      return (
+                        <div
+                          key={leave.id}
+                          className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs space-y-2.5"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-xs text-[#0A2540]">{leave.leaveType}</span>
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-teal-50 text-teal-700 border border-teal-200/60">
+                                  {leave.totalDays} {leave.totalDays === 1 ? 'Day' : 'Days'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                                {leave.fromDate} {leave.toDate && leave.toDate !== leave.fromDate ? `➔ ${leave.toDate}` : ''}
+                              </p>
+                            </div>
+
+                            <div className="flex-shrink-0">
+                              {isPending ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200 shadow-2xs">
+                                  <Clock className="w-3 h-3 text-amber-600" />
+                                  <span>Pending Admin Approval</span>
+                                </span>
+                              ) : isApproved ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 shadow-2xs">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                  <span>Approved by Admin</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-rose-50 text-rose-800 border border-rose-200 shadow-2xs">
+                                  <XCircle className="w-3 h-3 text-rose-600" />
+                                  <span>Declined</span>
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {leave.reason && (
+                            <p className="text-[11px] text-slate-600 bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                              <strong className="text-slate-700">Reason:</strong> {leave.reason}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* --- TAB 4: REPORTS & CSV EXPORTS --- */}
+        {activeHrNav === 'reports' && (
+          <div className="space-y-4 animate-in fade-in duration-150">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-display font-black text-lg text-[#0A2540]">HR Analytics &amp; Reports</h2>
+                <p className="text-xs text-slate-500">Workforce roster &amp; biometric audits</p>
+              </div>
+              <button
+                onClick={exportHrReportCSV}
+                className="py-2 px-3 rounded-xl bg-[#00C9A7] text-[#0A2540] font-bold text-xs flex items-center gap-1.5 shadow-sm"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export CSV</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs">
+                <span className="text-[10px] text-slate-500 block font-semibold">Total Employees</span>
+                <span className="font-mono-nums font-black text-lg text-[#0A2540]">{totalEmployees} Active</span>
+              </div>
+              <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs">
+                <span className="text-[10px] text-slate-500 block font-semibold">Biometric Regularity</span>
+                <span className="font-mono-nums font-black text-lg text-[#00A88B]">94.2%</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- TAB 5: DEDICATED MORE (HR Records & Asset Registry Hub) --- */}
+        {activeHrNav === 'more' && (
+          <div className="space-y-3 animate-in fade-in duration-150">
+            
+            {/* 3x2 Quick Action Grid: ID Card, Payslips, Meetings, Offer Letters, HR Account, Onboard (Compacted to 65% size) */}
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { 
+                  id: 'id_cards', 
+                  label: 'ID Card', 
+                  icon: CreditCard, 
+                  badge: `${teamMembers.length}` 
+                },
+                { 
+                  id: 'payslips', 
+                  label: 'Payslips', 
+                  icon: Receipt, 
+                  badge: `${activePayslips.length}` 
+                },
+                { 
+                  id: 'meetings', 
+                  label: 'Meetings', 
+                  icon: Video, 
+                  badge: `${teamMeetings.filter(m => m.type?.includes('Interview') || m.title?.includes('Interview')).length}` 
+                },
+                { 
+                  id: 'offers', 
+                  label: 'Offer Letters', 
+                  icon: Award, 
+                  badge: `${offerLetters.length}` 
+                },
+                { 
+                  id: 'hr_account', 
+                  label: 'HR Account', 
+                  icon: Shield, 
+                  badge: 'Admin' 
+                },
+                { 
+                  id: 'invoices', 
+                  label: 'Invoices', 
+                  icon: FileText, 
+                  badge: `${invoices.length}` 
+                },
+                { 
+                  id: 'onboard', 
+                  label: 'Onboard', 
+                  icon: UserPlus, 
+                  badge: '+ New',
+                  isAccent: true 
+                },
+              ].map((btn) => {
+                const isActive = moreSubTab === btn.id || (btn.id === 'id_cards' && moreSubTab === 'credentials') || (btn.id === 'meetings' && moreSubTab === 'interviews');
+                const Icon = btn.icon;
+
+                return (
+                  <button
+                    key={btn.id}
+                    type="button"
+                    onClick={() => {
+                      setMoreSubTab(btn.id as any);
+                      setMoreSearchQuery('');
+                      if (btn.id === 'onboard') {
+                        setIsAddEmployeeModalOpen(true);
+                      }
+                    }}
+                    className={`py-1 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 transition-all text-center relative cursor-pointer active:scale-95 ${
+                      isActive
+                        ? 'bg-[#0A2540] text-white shadow-sm ring-1.5 ring-[#00C9A7]/60'
+                        : btn.isAccent
+                          ? 'bg-gradient-to-b from-teal-50/70 to-emerald-50/90 border border-teal-200 text-[#00897B] hover:border-teal-300 shadow-2xs'
+                          : 'bg-white border border-slate-200/90 hover:border-slate-300 text-slate-700 shadow-2xs hover:shadow-xs'
+                    }`}
+                  >
+                    <div className={`w-5 h-5 rounded-md flex items-center justify-center transition-colors ${
+                      isActive 
+                        ? 'bg-white/10 text-[#00C9A7]' 
+                        : btn.isAccent 
+                          ? 'bg-teal-500/10 text-[#00A88B]' 
+                          : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      <Icon className="w-3 h-3" />
+                    </div>
+                    <span className={`text-[9.5px] font-bold leading-tight truncate max-w-full px-0.5 ${isActive ? 'text-white' : 'text-slate-800'}`}>
+                      {btn.label}
+                    </span>
+                    {btn.badge && (
+                      <span className={`text-[7px] font-extrabold px-1.5 py-0 rounded-full leading-tight ${
+                        isActive 
+                          ? 'bg-[#00C9A7] text-[#0A2540]' 
+                          : btn.isAccent
+                            ? 'bg-[#00C9A7]/20 text-[#00897B]'
+                            : 'bg-slate-100 text-slate-500'
+                      }`}>
+                        {btn.badge}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* CATEGORY 1: EMPLOYEE CREDENTIALS & DIGITAL ID CARDS */}
+            {(moreSubTab === 'id_cards' || moreSubTab === 'credentials') && (
+              <div className="space-y-3 animate-in fade-in duration-150">
+                
+                {/* Search Bar (70%) + Create Button (30%) - Same height */}
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input 
+                      type="text" 
+                      value={moreSearchQuery}
+                      onChange={(e) => setMoreSearchQuery(e.target.value)}
+                      placeholder="Search name, TNX code, email..."
+                      className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-[#00C9A7] shadow-2xs font-medium"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsAddEmployeeModalOpen(true)}
+                    className="px-3 py-2 bg-gradient-to-r from-[#00A88B] to-[#00C9A7] text-[#0A2540] font-black text-xs rounded-xl shadow-2xs hover:brightness-105 active:scale-95 whitespace-nowrap flex items-center justify-center gap-1.5 flex-shrink-0 cursor-pointer border border-[#00C9A7]/30"
+                  >
+                    <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                    <span>Issue ID</span>
+                  </button>
+                </div>
+
+                {/* Employee Credentials Cards List */}
+                <div className="space-y-3">
+                  {(() => {
+                    const filtered = teamMembers.filter(m => 
+                      m.name.toLowerCase().includes(moreSearchQuery.toLowerCase()) ||
+                      m.empCode.toLowerCase().includes(moreSearchQuery.toLowerCase()) ||
+                      (m.email && m.email.toLowerCase().includes(moreSearchQuery.toLowerCase())) ||
+                      (m.group && m.group.toLowerCase().includes(moreSearchQuery.toLowerCase()))
+                    );
+
+                    if (filtered.length === 0) {
+                      return (
+                        <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-xs text-slate-400">
+                          No employees found matching "{moreSearchQuery}".
+                        </div>
+                      );
+                    }
+
+                    return filtered.map((emp) => {
+                      const isPassVisible = !!visiblePasswords[emp.id];
+                      const passwordDisplay = emp.password || 'Trade@1234';
+                      const isAdminAccount = Boolean(emp.role === 'admin' || emp.portal === 'admin' || emp.empCode === 'ADM-01' || (emp.role && emp.role.toLowerCase().includes('admin')));
+
+                      return (
+                        <div key={emp.id} className="bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 shadow-2xs space-y-3 transition-all">
+                          {/* Header row: Avatar, Name, Code, Squad, Active Badge */}
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <div className="w-10 h-10 rounded-xl bg-[#0A2540] text-[#00C9A7] font-display font-black text-xs flex items-center justify-center flex-shrink-0 shadow-xs">
+                                {emp.avatar?.startsWith('http') ? (
+                                  <img src={emp.avatar} alt={emp.name} className="w-full h-full object-cover rounded-xl" />
+                                ) : (
+                                  emp.name.substring(0, 2).toUpperCase()
+                                )}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <strong className="text-xs font-bold text-[#0A2540] truncate">{emp.name}</strong>
+                                  <span className="px-1.5 py-0.2 rounded bg-slate-100 text-slate-700 text-[9px] font-mono font-bold">
+                                    {emp.empCode}
+                                  </span>
+                                </div>
+                                <p className="text-[10px] text-slate-500 font-medium truncate">
+                                  <span className="font-bold text-slate-700">{emp.role}</span> • <span>{emp.group || 'Sales Squad'}</span>
+                                </p>
+                              </div>
+                            </div>
+
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase bg-emerald-50 text-emerald-700 border border-emerald-200 flex-shrink-0">
+                              Active Staff
+                            </span>
+                          </div>
+
+                          {/* Credentials Box: Login ID & Password with Show/Hide */}
+                          <div className="bg-slate-50/90 border border-slate-100 rounded-xl p-2.5 space-y-1.5 text-xs">
+                            <div className="flex items-center justify-between text-[11px]">
+                              <span className="text-slate-400 font-medium">Login ID:</span>
+                              <span className="font-mono font-bold text-slate-800 selection:bg-teal-100">
+                                {emp.email || emp.phone || emp.empCode}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-200/60">
+                              <span className="text-slate-400 font-medium">Password:</span>
+                              <span className="text-slate-400 italic text-[10px] flex items-center gap-1 font-medium bg-slate-100 px-2 py-0.5 rounded-lg border border-slate-200">
+                                <Lock className="w-3 h-3 text-slate-400" />
+                                <span>Confidential • Super Admin Access Only</span>
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Quick Actions Row: View ID Card | Inspect 360 */}
+                          <div className="flex items-center justify-between gap-2 pt-0.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedIdCardEmpId(emp.id);
+                                  setIsIdCardModalOpen(true);
+                                }}
+                                className="px-2.5 py-1.5 rounded-xl bg-teal-50 hover:bg-teal-100 text-[#00897B] font-bold text-[10px] inline-flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer border border-[#00C9A7]/30 shadow-2xs"
+                                title="Open digital ID Card"
+                              >
+                                <CreditCard className="w-3.5 h-3.5" />
+                                <span>View ID Card</span>
+                              </button>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => setSelectedEmployeeFor360(emp)}
+                              className="text-[11px] font-bold text-[#00A88B] hover:text-[#0A2540] inline-flex items-center gap-0.5 transition-colors cursor-pointer"
+                            >
+                              <span>360 Profile</span>
+                              <ChevronRight className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+              </div>
+            )}
+
+            {/* CATEGORY 2: OFFICIAL OFFER LETTERS */}
+            {moreSubTab === 'offers' && (
+              <div className="space-y-3 animate-in fade-in duration-150">
+                
+                {/* Search Bar (70%) + Create Button (30%) - Same height */}
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input 
+                      type="text" 
+                      value={moreSearchQuery}
+                      onChange={(e) => setMoreSearchQuery(e.target.value)}
+                      placeholder="Search candidate, role..."
+                      className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-[#00C9A7] shadow-2xs font-medium"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsGenerateOfferLetterModalOpen(true)}
+                    className="px-3 py-2 bg-gradient-to-r from-[#00A88B] to-[#00C9A7] text-[#0A2540] font-black text-xs rounded-xl shadow-2xs hover:brightness-105 active:scale-95 whitespace-nowrap flex items-center justify-center gap-1.5 flex-shrink-0 cursor-pointer border border-[#00C9A7]/30"
+                  >
+                    <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                    <span>Draft Offer</span>
+                  </button>
+                </div>
+
+                <div className="space-y-2.5">
+                  {(() => {
+                    const filtered = offerLetters.filter(l => 
+                      l.candidateName.toLowerCase().includes(moreSearchQuery.toLowerCase()) ||
+                      l.roleTitle.toLowerCase().includes(moreSearchQuery.toLowerCase()) ||
+                      (l.candidateEmail && l.candidateEmail.toLowerCase().includes(moreSearchQuery.toLowerCase()))
+                    );
+
+                    if (filtered.length === 0) {
+                      return (
+                        <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-xs text-slate-400">
+                          {moreSearchQuery ? `No offer letters found matching "${moreSearchQuery}".` : 'No offer letters created yet. Tap "+ Draft Offer" to generate one.'}
+                        </div>
+                      );
+                    }
+
+                    return filtered.map((letter) => (
+                      <div 
+                        key={letter.id}
+                        className="bg-white p-3.5 rounded-2xl border border-slate-200 hover:border-teal-400 shadow-2xs space-y-2.5 transition-all"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <strong className="text-xs font-bold text-[#0A2540] block">{letter.candidateName}</strong>
+                            <span className="text-[10px] text-slate-500">{letter.candidateEmail || 'Candidate'} • {letter.candidatePhone}</span>
+                          </div>
+                          <span className="text-[9px] font-bold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200/80">
+                            Issued
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 bg-slate-50 p-2 rounded-xl text-xs">
+                          <div>
+                            <span className="text-[9px] uppercase font-bold text-slate-400 block">Designation</span>
+                            <strong className="text-slate-700 text-[11px] block truncate">{letter.roleTitle}</strong>
+                          </div>
+                          <div>
+                            <span className="text-[9px] uppercase font-bold text-slate-400 block">Annual CTC</span>
+                            <strong className="text-[#00A88B] text-[11px] block">₹{(letter.annualCtc ?? 0).toLocaleString('en-IN')}</strong>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100">
+                          <span className="text-[10px] font-mono text-slate-400">
+                            Issued: {letter.issuedDate}
+                          </span>
+                          <div className="flex items-center gap-1.5 flex-shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedOfferLetter(letter);
+                                setIsOfferLetterModalOpen(true);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-[#0A2540] text-white hover:bg-[#133353] font-bold text-[10px] inline-flex items-center gap-1 transition-all"
+                            >
+                              <FileText className="w-3 h-3 text-[#00C9A7]" />
+                              <span>View / Print</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (window.confirm(`Delete offer letter for "${letter.candidateName}" permanently?`)) {
+                                  deleteOfferLetter(letter.id);
+                                }
+                              }}
+                              title="Delete offer letter"
+                              className="p-1 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 hover:text-rose-700 transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+
+            {/* CATEGORY 3: GENERATED PAYSLIPS */}
+            {moreSubTab === 'payslips' && (
+              <div className="space-y-3 animate-in fade-in duration-150">
+                
+                {/* Search Bar (70%) + Create Button (30%) - Same height */}
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input 
+                      type="text" 
+                      value={moreSearchQuery}
+                      onChange={(e) => setMoreSearchQuery(e.target.value)}
+                      placeholder="Search employee, month, status..."
+                      className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-[#00C9A7] shadow-2xs font-medium"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => openPayrollBuilder()}
+                    className="px-3 py-2 bg-gradient-to-r from-[#00A88B] to-[#00C9A7] text-[#0A2540] font-black text-xs rounded-xl shadow-2xs hover:brightness-105 active:scale-95 whitespace-nowrap flex items-center justify-center gap-1.5 flex-shrink-0 cursor-pointer border border-[#00C9A7]/30"
+                  >
+                    <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                    <span>Create Payroll</span>
+                  </button>
+                </div>
+
+                <div className="space-y-2.5">
+                  {(() => {
+                    // Only show payslips for current active employees (filter out deleted account records)
+                    const filtered = activePayslips.filter(ps => {
+                      if (!moreSearchQuery) return true;
+                      return (
+                        (ps.employeeName && ps.employeeName.toLowerCase().includes(moreSearchQuery.toLowerCase())) ||
+                        (ps.employeeCode && ps.employeeCode.toLowerCase().includes(moreSearchQuery.toLowerCase())) ||
+                        (ps.month && ps.month.toLowerCase().includes(moreSearchQuery.toLowerCase())) ||
+                        (ps.year && ps.year.toString().includes(moreSearchQuery)) ||
+                        ((ps.payrollStatus || 'DRAFT').toLowerCase().includes(moreSearchQuery.toLowerCase())) ||
+                        (ps.empCode && ps.empCode.toLowerCase().includes(moreSearchQuery.toLowerCase()))
+                      );
+                    });
+
+                    if (filtered.length === 0) {
+                      return (
+                        <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-xs text-slate-400">
+                          {moreSearchQuery ? `No payslips found matching "${moreSearchQuery}".` : 'No payroll created yet. Tap "+ Create Payroll" to customize and dispatch a month.'}
+                        </div>
+                      );
+                    }
+
+                    return filtered.map((ps) => {
+                      const totals = computePayrollTotals(ps);
+                      const dispatched = ps.payrollStatus === 'DISPATCHED';
+                      return (
+                        <div 
+                          key={ps.id}
+                          className="bg-white p-3.5 rounded-2xl border border-slate-200 hover:border-teal-400 shadow-2xs space-y-2.5 transition-all"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <strong className="text-xs font-bold text-[#0A2540] block truncate">{ps.employeeName || 'Staff Member'}</strong>
+                              <span className="text-[10px] text-slate-400 font-mono">{ps.empCode || ps.employeeCode || ps.id} • {ps.month} {ps.year}</span>
+                            </div>
+                            {dispatched ? (
+                              <span className="text-[9px] font-black px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 uppercase">Dispatched</span>
+                            ) : (
+                              <span className="text-[9px] font-black px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 uppercase">Draft</span>
+                            )}
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-2 bg-slate-50 p-2 rounded-xl text-xs">
+                            <div>
+                              <span className="text-[9px] uppercase font-bold text-slate-400 block">Earnings</span>
+                              <strong className="text-slate-700 text-[11px] block">₹{totals.totalEarnings.toLocaleString('en-IN')}</strong>
+                            </div>
+                            <div>
+                              <span className="text-[9px] uppercase font-bold text-slate-400 block">Net Pay</span>
+                              <strong className="text-[#00A88B] text-[11px] block">₹{totals.netPay.toLocaleString('en-IN')}</strong>
+                            </div>
+                            <div>
+                              <span className="text-[9px] uppercase font-bold text-slate-400 block">Dispatched On</span>
+                              <strong className="text-slate-600 text-[10px] block">{ps.dispatchedAt ? new Date(ps.dispatchedAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) + ' ' + new Date(ps.dispatchedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '—'}</strong>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-end text-xs pt-1 border-t border-slate-100 gap-1.5 flex-wrap">
+                            {dispatched ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => openPayslipModal(ps)}
+                                  className="px-2.5 py-1 rounded-lg bg-teal-50 text-[#00897B] hover:bg-teal-100 font-bold text-[10px] inline-flex items-center gap-1 transition-all border border-[#00C9A7]/30 cursor-pointer"
+                                >
+                                  <Receipt className="w-3 h-3" />
+                                  <span>View</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={emailingPayslipId === ps.id}
+                                  onClick={async () => {
+                                    setEmailingPayslipId(ps.id);
+                                    try {
+                                      await sendPayslipEmailToEmployee(ps.id, ps.email);
+                                    } finally {
+                                      setEmailingPayslipId(null);
+                                    }
+                                  }}
+                                  className="px-2 py-1 rounded-lg bg-[#E6FAF6] hover:bg-[#D0F7F0] text-[#00897B] font-bold text-[10px] inline-flex items-center gap-1 transition-all border border-[#00C9A7]/30 cursor-pointer disabled:opacity-50"
+                                >
+                                  <Mail className="w-3 h-3 text-[#00A88B]" />
+                                  <span>{emailingPayslipId === ps.id ? 'Sending...' : 'Resend Email'}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openPayrollBuilder(ps)}
+                                  className="px-2.5 py-1 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-[10px] inline-flex items-center gap-1 transition-all border border-slate-200 cursor-pointer"
+                                >
+                                  <FileEdit className="w-3 h-3" />
+                                  <span>Manage</span>
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => openPayslipModal(ps)}
+                                  className="px-2.5 py-1 rounded-lg bg-teal-50 text-[#00897B] hover:bg-teal-100 font-bold text-[10px] inline-flex items-center gap-1 transition-all border border-[#00C9A7]/30 cursor-pointer"
+                                >
+                                  <Receipt className="w-3 h-3" />
+                                  <span>Preview</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openPayrollBuilder(ps)}
+                                  className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-[10px] inline-flex items-center gap-1 transition-all border border-amber-300 cursor-pointer"
+                                >
+                                  <FileEdit className="w-3 h-3" />
+                                  <span>Edit Draft / Dispatch</span>
+                                </button>
+                              </>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const warn = dispatched ? ' This also removes it from the employee account.' : '';
+                                if (window.confirm(`Delete ${ps.month} ${ps.year} payroll for ${ps.employeeName || 'this staff'}?${warn}`)) {
+                                  deletePayslip(ps.id);
+                                }
+                              }}
+                              title="Delete payroll"
+                              className="p-1 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 hover:text-rose-700 transition-colors cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+              </div>
+            )}
+
+            {/* CATEGORY 4: INTERVIEW CALLS & MEETINGS */}
+            {(moreSubTab === 'meetings' || moreSubTab === 'interviews') && (
+              <div className="space-y-3 animate-in fade-in duration-150">
+                
+                {/* Search Bar (70%) + Create Button (30%) - Same height */}
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input 
+                      type="text" 
+                      value={moreSearchQuery}
+                      onChange={(e) => setMoreSearchQuery(e.target.value)}
+                      placeholder="Search interview, candidate..."
+                      className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-[#00C9A7] shadow-2xs font-medium"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsInterviewModalOpen(true)}
+                    className="px-3 py-2 bg-gradient-to-r from-[#00A88B] to-[#00C9A7] text-[#0A2540] font-black text-xs rounded-xl shadow-2xs hover:brightness-105 active:scale-95 whitespace-nowrap flex items-center justify-center gap-1.5 flex-shrink-0 cursor-pointer border border-[#00C9A7]/30"
+                  >
+                    <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                    <span>Schedule</span>
+                  </button>
+                </div>
+
+                <div className="space-y-2.5">
+                  {(() => {
+                    const interviews = teamMeetings.filter(m => 
+                      (m.type?.includes('Interview') || m.title?.includes('Interview')) &&
+                      (m.title.toLowerCase().includes(moreSearchQuery.toLowerCase()) ||
+                       (m.type && m.type.toLowerCase().includes(moreSearchQuery.toLowerCase())) ||
+                       (m.agenda && m.agenda.toLowerCase().includes(moreSearchQuery.toLowerCase())))
+                    );
+                    if (interviews.length === 0) {
+                      return (
+                        <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-xs text-slate-400">
+                          {moreSearchQuery ? `No interviews match "${moreSearchQuery}".` : 'No candidate interviews currently scheduled. Tap "+ Schedule" to book one.'}
+                        </div>
+                      );
+                    }
+
+                    return interviews.map((meet) => (
+                      <div key={meet.id} className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xs space-y-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center flex-shrink-0">
+                              <Video className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <strong className="text-xs font-bold text-[#0A2540] block">{meet.title}</strong>
+                              <span className="text-[10px] text-slate-400">{meet.dateTime}</span>
+                            </div>
+                          </div>
+                          <span className="text-[9px] font-bold px-2 py-0.5 rounded-md bg-purple-50 text-purple-700 border border-purple-200">
+                            Scheduled
+                          </span>
+                        </div>
+
+                        <p className="text-xs text-slate-600 bg-slate-50 p-2 rounded-xl">
+                          {meet.agenda || 'HR & Technical Screening interview'}
+                        </p>
+
+                        <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100">
+                          <span className="text-[10px] text-slate-500 font-medium">
+                            Panel: {meet.invitedMemberName || 'HR Panel'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(meet.meetingLink || 'https://meet.tradenexus.io/interview-hr');
+                              triggerToast('✓ Interview video call link copied to clipboard!');
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[10px] inline-flex items-center gap-1"
+                          >
+                            <Copy className="w-3 h-3 text-slate-500" />
+                            <span>Copy Room Link</span>
+                          </button>
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+
+            {/* CATEGORY 5: HR EXECUTIVE ACCOUNT & PRIVILEGES */}
+            {moreSubTab === 'hr_account' && (
+              <div className="space-y-3.5 animate-in fade-in duration-150">
+                <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs space-y-4">
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#0A2540] to-[#133353] text-[#00C9A7] flex items-center justify-center font-display font-black text-base shadow-sm border border-[#00C9A7]/30">
+                      HR
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <strong className="text-sm font-bold text-[#0A2540]">Sarah Jenkins</strong>
+                        <span className="px-1.5 py-0.5 rounded-md bg-emerald-50 text-emerald-800 text-[9px] font-extrabold border border-emerald-200">
+                          Super Admin
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 font-medium">Head of HR &amp; People Operations</p>
+                      <span className="text-[10px] font-mono text-slate-400">ID: TNX-HR-001 • Dept: Human Capital</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 bg-slate-50 p-2.5 rounded-xl text-xs">
+                    <div>
+                      <span className="text-[9px] uppercase font-bold text-slate-400 block">System Access</span>
+                      <strong className="text-[#0A2540] text-[11px] block">Full Org Controller</strong>
+                    </div>
+                    <div>
+                      <span className="text-[9px] uppercase font-bold text-slate-400 block">Security Tier</span>
+                      <strong className="text-[#00A88B] text-[11px] block">Tier 1 Compliance</strong>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 pt-1 border-t border-slate-100 text-xs">
+                    <div className="flex items-center justify-between text-slate-600">
+                      <span className="text-[11px] text-slate-400">Official Portal Login:</span>
+                      <span className="font-mono font-bold text-slate-800">hr.admin@tradenexus.com</span>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-600">
+                      <span className="text-[11px] text-slate-400">Biometric Verification:</span>
+                      <span className="font-bold text-emerald-700">Enrolled &amp; Validated</span>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-600">
+                      <span className="text-[11px] text-slate-400">Workforce Scope:</span>
+                      <span className="font-bold text-slate-800">{teamMembers.length} Active Personnel</span>
+                    </div>
+                  </div>
+
+                  <div className="pt-1 flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsLeaveModalOpen(true)}
+                      className="w-full py-2.5 rounded-xl bg-teal-50 hover:bg-teal-100 border border-[#00C9A7]/40 text-[#00A88B] font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-98 shadow-2xs cursor-pointer"
+                    >
+                      <CalendarCheck className="w-4 h-4 text-[#00A88B]" />
+                      <span>Apply Personal Leave (To Admin)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const hrCreds = `Mona Sri HR Admin Access\nName: HR Manager\nID: MSE-HR01\nPortal: hr@monasri.com\nTier: HR Operations\nDomain: ${window.location.origin}`;
+                        navigator.clipboard.writeText(hrCreds);
+                        triggerToast('✓ Copied HR Admin profile to clipboard!');
+                      }}
+                      className="w-full py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-98"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copy HR Access Credentials</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={exportHrReportCSV}
+                      className="w-full py-2 rounded-xl bg-[#0A2540] hover:bg-[#133353] text-[#00C9A7] font-bold text-xs flex items-center justify-center gap-1.5 shadow-2xs transition-all active:scale-98"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Export Organization Master Audit</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* CATEGORY 6: ONBOARDING PIPELINE */}
+            {moreSubTab === 'onboard' && (
+              <div className="space-y-3 animate-in fade-in duration-150">
+                
+                {/* Search Bar (70%) + Create Button (30%) - Same height */}
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input 
+                      type="text" 
+                      value={moreSearchQuery}
+                      onChange={(e) => setMoreSearchQuery(e.target.value)}
+                      placeholder="Search new hire, role..."
+                      className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-[#00C9A7] shadow-2xs font-medium"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsAddEmployeeModalOpen(true)}
+                    className="px-3 py-2 bg-gradient-to-r from-[#00A88B] to-[#00C9A7] text-[#0A2540] font-black text-xs rounded-xl shadow-2xs hover:brightness-105 active:scale-95 whitespace-nowrap flex items-center justify-center gap-1.5 flex-shrink-0 cursor-pointer border border-[#00C9A7]/30"
+                  >
+                    <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                    <span>Add Staff</span>
+                  </button>
+                </div>
+
+                <div className="space-y-2.5">
+                  {(() => {
+                    const filtered = onboardingList.filter(emp =>
+                      emp.name.toLowerCase().includes(moreSearchQuery.toLowerCase()) ||
+                      emp.role.toLowerCase().includes(moreSearchQuery.toLowerCase()) ||
+                      (emp.status && emp.status.toLowerCase().includes(moreSearchQuery.toLowerCase()))
+                    );
+
+                    if (filtered.length === 0) {
+                      return (
+                        <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-xs text-slate-400 space-y-3">
+                          <p>{moreSearchQuery ? `No candidates match "${moreSearchQuery}".` : 'All newly onboarded candidates have completed setup.'}</p>
+                          <button
+                            type="button"
+                            onClick={() => setIsAddEmployeeModalOpen(true)}
+                            className="px-3.5 py-2 rounded-xl bg-[#00A88B] text-white font-bold text-xs inline-flex items-center gap-1.5 shadow-xs"
+                          >
+                            <UserPlus className="w-4 h-4" />
+                            <span>+ Onboard New Staff</span>
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    return filtered.map((emp) => (
+                      <div key={emp.id} className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <strong className="text-xs font-bold text-[#0A2540] block">{emp.name}</strong>
+                            <span className="text-[10px] text-slate-400">{emp.role} • Joining: {emp.joiningDate}</span>
+                          </div>
+                          <span className="text-[9px] font-bold px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 border border-blue-200">
+                            {emp.status}
+                          </span>
+                        </div>
+
+                        {/* Checklist progress */}
+                        <div className="space-y-1.5 pt-1 border-t border-slate-100 text-xs">
+                          <span className="text-[9px] uppercase font-bold text-slate-400 block">Onboarding Checklist</span>
+                          {[
+                            { key: 'documentsVerified' as const, task: 'Documents Verified' },
+                            { key: 'workstationAllocated' as const, task: 'Workstation Allocated' },
+                            { key: 'biometricEnrolled' as const, task: 'Biometric Face ID Enrolled' },
+                            { key: 'trainingScheduled' as const, task: 'Training Scheduled' },
+                          ].map((item) => {
+                            const completed = Boolean(emp.checklist?.[item.key]);
+                            return (
+                              <div 
+                                key={item.key}
+                                onClick={() => toggleOnboardingChecklist(emp.id, item.key)}
+                                className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-slate-50 cursor-pointer transition-colors"
+                              >
+                                <div className={`w-4 h-4 rounded-md flex items-center justify-center transition-colors ${
+                                  completed ? 'bg-emerald-500 text-white' : 'border border-slate-300 bg-white'
+                                }`}>
+                                  {completed && <Check className="w-3 h-3 stroke-[3]" />}
+                                </div>
+                                <span className={`text-[11px] font-medium ${completed ? 'line-through text-slate-400' : 'text-slate-700'}`}>
+                                  {item.task}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+
+            {/* CATEGORY 7: COMMERCIAL INVOICES */}
+            {moreSubTab === 'invoices' && (
+              <InvoicesLedger
+                panelTitle="HR Commercial Invoices & Billing"
+                panelSubtitle="Create commercial client invoices, dispatch to customer email, and audit billing ledger"
+              />
+            )}
+
+            {/* Utility Download Bar */}
+            <div className="bg-slate-100/80 border border-slate-200/80 rounded-2xl p-3 flex items-center justify-between text-xs">
+              <span className="text-slate-600 font-semibold">Full Workforce Database</span>
+              <button
+                type="button"
+                onClick={exportHrReportCSV}
+                className="px-3 py-1.5 rounded-xl bg-[#0A2540] hover:bg-[#133353] text-[#00C9A7] font-bold text-[10px] inline-flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export Master CSV</span>
+              </button>
+            </div>
+
+            {/* ---- Logout Button ---- */}
+            <button
+              onClick={() => logout()}
+              className="w-full mt-4 mb-8 flex items-center justify-center gap-2.5 bg-red-50 hover:bg-red-100 border border-red-200 hover:border-red-400 text-red-600 hover:text-red-700 rounded-2xl p-4 font-bold text-sm transition-all active:scale-[0.98] cursor-pointer group shadow-xs"
+            >
+              <LogOut className="w-5 h-5 group-hover:scale-110 transition-transform" />
+              <span>Logout</span>
+            </button>
+
+          </div>
+        )}
+
+      </div>
+
+      {/* Modern HR Bottom Navigation Bar */}
+      <div className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-md border-t border-slate-200 z-40 px-3 py-2 lg:bottom-4 lg:left-1/2 lg:-translate-x-1/2 lg:w-full lg:max-w-2xl lg:rounded-2xl lg:border lg:shadow-xl lg:px-4">
+        <div className="flex justify-around items-center w-full mx-auto">
+          {[
+            { id: 'home', label: 'Home', icon: Home },
+            { id: 'attendance', label: 'Attendance', icon: CalendarCheck, badge: lateCount > 0 ? lateCount : undefined },
+            { id: 'employees', label: 'Team', icon: Users },
+            { id: 'approvals', label: 'Leaves', icon: UserCheck, badge: pendingLeavesCount > 0 ? pendingLeavesCount : undefined },
+            { id: 'more', label: 'More', icon: MoreHorizontal },
+          ].map((item) => {
+            const Icon = item.icon;
+            const isActive = activeHrNav === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setActiveHrNav(item.id as any)}
+                className={`flex flex-col items-center gap-1 text-[10px] font-bold transition-all relative ${
+                  isActive ? 'text-[#00A88B]' : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                <Icon className={`w-5 h-5 ${isActive ? 'stroke-[2.5]' : 'stroke-2'}`} />
+                <span>{item.label}</span>
+                {!!item.badge && item.badge > 0 && (
+                  <span className="absolute -top-1 right-2 w-4 h-4 rounded-full bg-rose-500 text-white font-mono text-[9px] flex items-center justify-center">
+                    {item.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* --- MODALS & DIALOGS --- */}
+      
+      {/* 1. Add Employee Modal */}
+      <AddEmployeeModal
+        isOpen={isAddEmployeeModalOpen}
+        onClose={() => setIsAddEmployeeModalOpen(false)}
+      />
+
+      {/* 2. Generate Offer Letter Form Modal (Image 4 Template) */}
+      <GenerateOfferLetterModal
+        isOpen={isGenerateOfferLetterModalOpen}
+        onClose={() => setIsGenerateOfferLetterModalOpen(false)}
+      />
+
+      {/* 3. Face Registration Modal */}
+      <FaceRegistrationModal />
+
+      {/* 6. Payroll Builder (select employee → month → customize → preview → dispatch) */}
+      <PayrollBuilderModal
+        isOpen={isPayslipGenModalOpen}
+        initialPayslip={builderPayslip}
+        onClose={() => { setIsPayslipGenModalOpen(false); setBuilderPayslip(null); }}
+      />
+
+      {/* 7. Schedule Candidate Interview Modal */}
+      {isInterviewModalOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl space-y-4 border border-slate-200 animate-in zoom-in-95 max-h-[92vh] overflow-y-auto">
+            
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center font-bold">
+                  <Video className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-display font-black text-base text-[#0A2540]">Schedule Candidate Interview</h3>
+                  <p className="text-xs text-slate-500">Meeting will be dispatched to interviewers' dashboards &amp; alerts</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setIsInterviewModalOpen(false)}
+                className="w-7 h-7 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-500"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleScheduleInterviewSubmit} className="space-y-3 text-xs">
+              
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Candidate Full Name *</label>
+                <input
+                  type="text"
+                  value={candName}
+                  onChange={(e) => setCandName(e.target.value)}
+                  placeholder="e.g. Siddharth Rao"
+                  className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold focus:outline-none focus:border-[#00C9A7]"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="font-bold text-slate-700 block mb-1">Role Applied</label>
+                  <input
+                    type="text"
+                    value={candRole}
+                    onChange={(e) => setCandRole(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold focus:outline-none focus:border-[#00C9A7]"
+                  />
+                </div>
+                <div>
+                  <label className="font-bold text-slate-700 block mb-1">Date &amp; Time</label>
+                  <input
+                    type="text"
+                    value={candTime}
+                    onChange={(e) => setCandTime(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold focus:outline-none focus:border-[#00C9A7]"
+                  />
+                </div>
+              </div>
+
+              {/* Team Squad Filter Dropdown */}
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Select Interview Squad / Department:</label>
+                <select
+                  value={interviewTeamScope}
+                  onChange={(e) => setInterviewTeamScope(e.target.value)}
+                  className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 font-semibold focus:outline-none focus:border-[#00C9A7]"
+                >
+                  <option value="ALL">All Teams &amp; Squads</option>
+                  {teamGroups.map(g => (
+                    <option key={g.id} value={g.name}>{g.name} (TL: {g.leaderName})</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Multi-Select Interviewers / Employees */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="font-bold text-slate-700">Select Interviewers / Attendees:</label>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedInterviewers(teamMembers.map(m => m.name))}
+                    className="text-[10px] font-bold text-[#00A88B] hover:underline"
+                  >
+                    Select All
+                  </button>
+                </div>
+
+                <div className="border border-slate-200 rounded-2xl p-2.5 bg-slate-50 space-y-1.5 max-h-36 overflow-y-auto">
+                  {teamMembers
+                    .filter(m => interviewTeamScope === 'ALL' || m.group === interviewTeamScope)
+                    .map(m => (
+                      <label key={m.id} className="flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedInterviewers.includes(m.name)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedInterviewers(prev => [...prev, m.name]);
+                            } else {
+                              setSelectedInterviewers(prev => prev.filter(name => name !== m.name));
+                            }
+                          }}
+                          className="rounded text-[#00C9A7] focus:ring-[#00C9A7]"
+                        />
+                        <span>{m.name} ({m.role} • {m.group || 'Sales'})</span>
+                      </label>
+                    ))}
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsInterviewModalOpen(false)}
+                  className="py-3 px-4 rounded-xl bg-slate-100 text-slate-600 font-bold hover:bg-slate-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-black shadow-md hover:brightness-105 flex items-center justify-center gap-2"
+                >
+                  <Video className="w-4 h-4" />
+                  <span>Schedule &amp; Dispatch Video Call</span>
+                </button>
+              </div>
+
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* HR Broadcast & Push Notification Hub Modal */}
+      <SendBroadcastModal
+        isOpen={isBroadcastModalOpen}
+        onClose={() => setIsBroadcastModalOpen(false)}
+        defaultCategory={broadcastCategory}
+        prefilledEmployee={broadcastPrefilledEmp}
+      />
+
+      {/* HR Meeting Scheduler Modal (Mobile Optimized) */}
+      {isHrMeetingModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 animate-in fade-in duration-150">
+          <div 
+            className="bg-white text-slate-800 rounded-3xl w-full max-w-md max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 animate-in zoom-in-95 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="bg-[#0A2540] text-white p-4.5 flex items-center justify-between relative overflow-hidden flex-shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-blue-500/20 border border-blue-400/40 flex items-center justify-center text-blue-400 shadow-inner">
+                  <Video className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <h3 className="font-display font-black text-base text-white">HR Video Meeting</h3>
+                    <span className="text-[9px] font-black uppercase tracking-wider bg-blue-500 text-white px-1.5 py-0.5 rounded font-mono">
+                      Live Room
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    Schedule with Team Leaders, Employees or Floor
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsHrMeetingModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-xl hover:bg-white/10 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Scrollable Form */}
+            <form onSubmit={handleCreateHrMeetingSubmit} className="flex-1 overflow-y-auto p-4.5 space-y-3.5 text-xs">
+              
+              {/* Meeting Title */}
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">
+                  Meeting Title <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={hrMeetingTitle}
+                  onChange={(e) => setHrMeetingTitle(e.target.value)}
+                  placeholder="e.g. Q3 Performance Review / TL Weekly Alignment"
+                  required
+                  className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 font-bold focus:outline-none focus:border-blue-500 text-xs"
+                />
+              </div>
+
+              {/* Audience Scope Selection (HR Hierarchy) */}
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Target Participants</label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setHrMeetingScope('INDIVIDUAL')}
+                    className={`p-2 rounded-xl border text-center font-bold text-[11px] transition-all cursor-pointer ${
+                      hrMeetingScope === 'INDIVIDUAL'
+                        ? 'bg-blue-50 border-blue-500 text-blue-800 ring-1 ring-blue-500/30'
+                        : 'bg-slate-50 border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    🤝 1-on-1
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHrMeetingScope('ALL_TL')}
+                    className={`p-2 rounded-xl border text-center font-bold text-[11px] transition-all cursor-pointer ${
+                      hrMeetingScope === 'ALL_TL'
+                        ? 'bg-blue-50 border-blue-500 text-blue-800 ring-1 ring-blue-500/30'
+                        : 'bg-slate-50 border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    👥 All TLs
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHrMeetingScope('ALL')}
+                    className={`p-2 rounded-xl border text-center font-bold text-[11px] transition-all cursor-pointer ${
+                      hrMeetingScope === 'ALL'
+                        ? 'bg-blue-50 border-blue-500 text-blue-800 ring-1 ring-blue-500/30'
+                        : 'bg-slate-50 border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    🏛️ All Staff
+                  </button>
+                </div>
+              </div>
+
+              {/* 1-on-1 Individual Member Picker */}
+              {hrMeetingScope === 'INDIVIDUAL' && (
+                <div className="space-y-1.5 p-3 rounded-2xl bg-slate-50 border border-slate-200">
+                  <label className="font-bold text-slate-700 block">Select Employee or TL:</label>
+                  <input
+                    type="text"
+                    value={hrEmpSearch}
+                    onChange={(e) => setHrEmpSearch(e.target.value)}
+                    placeholder="Search by name, role or emp code..."
+                    className="w-full p-2 rounded-xl bg-white border border-slate-200 text-xs focus:outline-none focus:border-blue-500"
+                  />
+                  <div className="max-h-32 overflow-y-auto space-y-1 pr-1 bg-white rounded-xl border border-slate-200 p-1">
+                    {teamMembers
+                      .filter(m => 
+                        !hrEmpSearch.trim() || 
+                        m.name.toLowerCase().includes(hrEmpSearch.toLowerCase()) || 
+                        m.empCode.toLowerCase().includes(hrEmpSearch.toLowerCase()) ||
+                        m.role.toLowerCase().includes(hrEmpSearch.toLowerCase())
+                      )
+                      .map(emp => (
+                        <div
+                          key={emp.id}
+                          onClick={() => setHrSelectedEmpId(emp.id)}
+                          className={`p-1.5 rounded-lg flex items-center justify-between cursor-pointer text-xs ${
+                            hrSelectedEmpId === emp.id ? 'bg-blue-50 border border-blue-200 text-blue-900 font-bold' : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <span className="block truncate">{emp.name} ({emp.empCode})</span>
+                            <span className="text-[10px] text-slate-400 block truncate">{emp.role} · {emp.group || 'Sales'}</span>
+                          </div>
+                          {hrSelectedEmpId === emp.id && <Check className="w-3.5 h-3.5 text-blue-600 flex-shrink-0" />}
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Date, Exact Time & Duration Scheduler */}
+              <MeetingTimePicker
+                onChange={(formatted) => setHrMeetingTime(formatted)}
+                accentColor="blue"
+              />
+
+              {/* 👑 Request Super Admin to Join Toggle (Core requirement) */}
+              <div className="p-3 rounded-2xl bg-amber-50/80 border border-amber-300 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-base">👑</span>
+                  <div>
+                    <span className="font-black text-xs text-amber-900 block leading-tight">
+                      Request Super Admin to Join
+                    </span>
+                    <span className="text-[10px] text-amber-700 block">
+                      Dispatches priority alert to Admin console
+                    </span>
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={hrIncludeAdmin}
+                  onChange={(e) => setHrIncludeAdmin(e.target.checked)}
+                  className="w-4 h-4 text-amber-600 rounded focus:ring-amber-500 cursor-pointer"
+                />
+              </div>
+
+              {/* Agenda (Optional) */}
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Agenda / Meeting Notes</label>
+                <textarea
+                  value={hrMeetingAgenda}
+                  onChange={(e) => setHrMeetingAgenda(e.target.value)}
+                  placeholder="Outline key topics to cover in this session..."
+                  rows={2}
+                  className="w-full p-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 text-xs focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              {/* Submit Buttons */}
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsHrMeetingModalOpen(false)}
+                  className="w-1/3 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-bold hover:bg-slate-200 text-xs"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="w-2/3 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:brightness-105 text-white font-black text-xs shadow-md shadow-blue-600/25 flex items-center justify-center gap-1.5"
+                >
+                  <Video className="w-4 h-4" />
+                  <span>Create Meeting</span>
+                </button>
+              </div>
+
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* HR Broadcast & Push Notification Hub Modal */}
+      <SendBroadcastModal
+        isOpen={isBroadcastModalOpen}
+        onClose={() => setIsBroadcastModalOpen(false)}
+        defaultCategory={broadcastCategory}
+        prefilledEmployee={broadcastPrefilledEmp}
+      />
+
+    </div>
+  );
+};

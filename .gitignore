@@ -1,0 +1,59 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Node modules & Builds
+node_modules/
+*/node_modules/
+dist/
+client/dist/
+dist-ssr/
+*.local
+
+# Vercel & Cloud Deployments
+.vercel
+.render
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# TypeScript build artifacts
+*.tsbuildinfo
+
+# SQLite database and its transient working files
+*.sqlite*
+server/db/data/*.sqlite*
+server/db/data/backups/
+*.db
+*.db-shm
+*.db-wal
+
+# Environment & Keys
+.env
+.env.*
+!.env.example
+client/.env
+client/.env.*
+!client/.env.example
+server/.env
+server/.env.*
+!server/.env.example
+*.pem
+*.key
+
+# Scratch & temporary directories
+scratch/
+templates errors/

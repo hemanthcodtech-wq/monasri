@@ -1,0 +1,21 @@
+# Node modules
+node_modules
+
+# SQLite databases & backups
+*.sqlite*
+db/data/*.sqlite*
+db/data/backups/
+*.db
+*.db-shm
+*.db-wal
+
+# Environment
+.env
+.env.*
+!server/.env.example
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

@@ -1,0 +1,167 @@
+import { Router, Request, Response } from 'express';
+import db from '../db/connection.js';
+import { requireRole } from '../middleware/auth.js';
+import { computeVerifiedSalesMaps } from '../utils/revenueUtils.js';
+
+const router = Router();
+
+// GET /api/team-groups
+router.get('/', (req: Request, res: Response) => {
+  try {
+    const user = req.user;
+    const salesMaps = computeVerifiedSalesMaps(db);
+    const allRoster = db.prepare('SELECT name, groupName FROM team_members').all() as any[];
+
+    const enrichGroup = (g: any) => {
+      const gNameLower = (g.name || '').trim().toLowerCase();
+      const lNameLower = (g.leaderName || '').trim().toLowerCase();
+      let monthlyAchieved = 0;
+      let allTimeAchieved = 0;
+
+      for (const m of allRoster) {
+        const mGroup = (m.groupName || '').trim().toLowerCase();
+        const mName = (m.name || '').trim().toLowerCase();
+        if (
+          (gNameLower && (mGroup === gNameLower || mGroup.includes(gNameLower))) ||
+          (lNameLower && mName === lNameLower)
+        ) {
+          monthlyAchieved += salesMaps.monthlyByCaller.get(mName) ?? 0;
+          allTimeAchieved += salesMaps.allTimeByCaller.get(mName) ?? 0;
+        }
+      }
+
+      return {
+        ...g,
+        achieved: monthlyAchieved,
+        allTimeAchieved,
+      };
+    };
+
+    // Team Leader: Scoped to their assigned squad/team
+    if (user && user.role === 'team_leader') {
+      const leaderId = user.employeeId || user.id;
+      const leaderEmpCode = user.empCode || '';
+      const leaderName = user.name || '';
+
+      const leaderRow = db.prepare(`
+        SELECT groupName FROM team_members 
+        WHERE id = ? OR empCode = ? OR LOWER(name) = LOWER(?)
+        LIMIT 1
+      `).get(leaderId, leaderEmpCode, leaderName) as any;
+      const squadName = leaderRow?.groupName || '';
+
+      const groups = db.prepare(`
+        SELECT g.id, g.name, g.description, g.leaderName, 
+               (SELECT COUNT(*) FROM team_members m WHERE (LOWER(m.groupName) = LOWER(g.name) OR LOWER(m.groupName) LIKE '%' || LOWER(g.name) || '%') AND m.active = 1) AS memberCount,
+               g.monthlyTarget, g.achieved, g.color, g.createdAt
+        FROM team_groups g 
+        WHERE LOWER(g.leaderName) = LOWER(?) OR LOWER(g.name) = LOWER(?)
+      `).all(leaderName, squadName) as any[];
+      return res.status(200).json(groups.map(enrichGroup));
+    }
+
+    const groups = db.prepare(`
+      SELECT g.id, g.name, g.description, g.leaderName, 
+             (SELECT COUNT(*) FROM team_members m WHERE LOWER(m.groupName) = LOWER(g.name) AND m.active = 1) AS memberCount,
+             g.monthlyTarget, g.achieved, g.color, g.createdAt
+      FROM team_groups g
+    `).all() as any[];
+    return res.status(200).json(groups.map(enrichGroup));
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// POST /api/team-groups
+router.post('/', requireRole('admin'), (req: Request, res: Response) => {
+  try {
+    const { id, name, description, leaderName, memberCount, monthlyTarget, achieved, color } = req.body;
+    const groupId = id || `grp-${Date.now()}`;
+
+    db.prepare(`
+      INSERT INTO team_groups (id, name, description, leaderName, memberCount, monthlyTarget, achieved, color)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      groupId, name || 'Group Name', description || '', leaderName || '',
+      memberCount ? Number(memberCount) : 1, monthlyTarget ? Number(monthlyTarget) : 0,
+      achieved ? Number(achieved) : 0, color || '#00C9A7'
+    );
+
+    const created = db.prepare('SELECT * FROM team_groups WHERE id = ?').get(groupId);
+    return res.status(201).json(created);
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// PUT /api/team-groups/:id
+router.put('/:id', requireRole('admin', 'team_leader'), (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const existing = db.prepare('SELECT * FROM team_groups WHERE id = ?').get(id) as any;
+    if (!existing) {
+      return res.status(404).json({ error: 'Team group not found' });
+    }
+
+    const user = req.user;
+    if (user && user.role === 'team_leader') {
+      const leaderName = user.name || '';
+      const leaderRow = db.prepare(`
+        SELECT groupName FROM team_members 
+        WHERE id = ? OR empCode = ? OR LOWER(name) = LOWER(?)
+        LIMIT 1
+      `).get(user.employeeId || user.id, user.empCode || '', leaderName) as any;
+      const squadName = leaderRow?.groupName || '';
+
+      if (existing.leaderName.toLowerCase() !== leaderName.toLowerCase() && existing.name.toLowerCase() !== squadName.toLowerCase()) {
+        return res.status(403).json({ error: 'Forbidden: Team Leader cannot modify groups outside assigned squad' });
+      }
+    }
+
+    const merged = { ...existing, ...req.body };
+    db.prepare(`
+      UPDATE team_groups 
+      SET name = ?, description = ?, leaderName = ?, memberCount = ?, 
+          monthlyTarget = ?, achieved = ?, color = ?
+      WHERE id = ?
+    `).run(
+      merged.name, merged.description, merged.leaderName, merged.memberCount,
+      merged.monthlyTarget, merged.achieved, merged.color, id
+    );
+
+    const updated = db.prepare('SELECT * FROM team_groups WHERE id = ?').get(id);
+    return res.status(200).json(updated);
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// DELETE /api/team-groups/:id
+router.delete('/:id', requireRole('admin'), (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const existing = db.prepare('SELECT * FROM team_groups WHERE id = ?').get(id) as any;
+    if (!existing) {
+      return res.status(404).json({ error: 'Team group not found' });
+    }
+
+    // Unassign team members assigned to this group name so they are not orphaned
+    db.prepare(`
+      UPDATE team_members 
+      SET groupName = 'Unassigned' 
+      WHERE groupName = ?
+    `).run(existing.name);
+
+    db.prepare('DELETE FROM team_groups WHERE id = ?').run(id);
+
+    return res.status(200).json({ 
+      success: true, 
+      message: `Team "${existing.name}" deleted successfully`, 
+      id 
+    });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+export default router;

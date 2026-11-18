@@ -1,0 +1,777 @@
+import { Router, Request, Response } from 'express';
+import db from '../db/connection.js';
+import { getTodayDateIST, getCurrentTimeIST, minutesOfDay } from '../utils/dateUtils.js';
+import { sweepUnclosedAttendance } from '../services/attendanceLifecycle.js';
+import { recalculateTodayAttendance } from './calendar.js';
+import { emitSocketEvent } from '../services/socketService.js';
+import { uploadToS3 } from '../services/s3Service.js';
+
+const router = Router();
+
+/**
+ * Uploads a base64 selfie directly to AWS S3 (tradex-media bucket) and returns the public S3 URL.
+ * If already a URL or if S3 upload fails, returns photoData gracefully so punch-in/out NEVER fails.
+ */
+async function processAttendancePhoto(
+  photoData: string | undefined | null,
+  empId: string,
+  type: 'in' | 'out'
+): Promise<string | null> {
+  if (!photoData || typeof photoData !== 'string') return null;
+  // If already an http(s) URL or empty, keep it as is
+  if (!photoData.startsWith('data:image')) {
+    return photoData;
+  }
+  try {
+    const matches = photoData.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+    if (!matches || matches.length !== 3) return photoData;
+    const mimeType = matches[1];
+    const buffer = Buffer.from(matches[2], 'base64');
+    const monthFolder = new Date().toISOString().slice(0, 7); // e.g. '2026-11'
+    const cleanEmpId = (empId || 'emp').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const fileName = `att_${cleanEmpId}_${type}_${Date.now()}.jpg`;
+    const result = await uploadToS3(buffer, fileName, mimeType, `attendance/${monthFolder}`);
+    return result.cdnUrl || result.s3Url || photoData;
+  } catch (err) {
+    console.warn('[Attendance S3 Upload Warning]: Could not upload to S3, falling back to local storage', err);
+    return photoData;
+  }
+}
+
+interface OfficeRow {
+  label: string;
+  latitude: number | null;
+  longitude: number | null;
+  radiusMeters: number;
+}
+
+/** Straight-line distance between two coordinates, in metres. */
+function metresBetween(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const earthRadius = 6371000;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return Math.round(earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+/**
+ * Attendance rows carry a photo and coordinates.
+ * Admin and Employees see their own.
+ * Team Leader and HR never receive raw locations on the wire.
+ * For bandwidth optimization: full photos are returned for today's live floor view or when includePhotos=true.
+ * Historical records return lightweight hasCheckInPhoto / hasCheckOutPhoto flags and on-demand GET /:id/photo.
+ */
+function forViewer(row: any, isAdmin: boolean, requestingEmployeeId?: string, includePhotos?: boolean) {
+  const isToday = row.date === getTodayDateIST();
+  const allowPhotos = includePhotos || isToday;
+  const hasCheckInPhoto = Boolean(row.checkInPhoto);
+  const hasCheckOutPhoto = Boolean(row.checkOutPhoto);
+
+  if (isAdmin || (requestingEmployeeId && (row.employeeId === requestingEmployeeId || row.id === requestingEmployeeId))) {
+    if (allowPhotos) {
+      return { ...row, hasCheckInPhoto, hasCheckOutPhoto };
+    }
+    const { checkInPhoto, checkOutPhoto, ...rest } = row;
+    return { ...rest, hasCheckInPhoto, hasCheckOutPhoto };
+  }
+  const { checkInPhoto, checkInLat, checkInLng, checkOutPhoto, checkOutLat, checkOutLng, ...rest } = row;
+  return { ...rest, hasCheckInPhoto, hasCheckOutPhoto };
+}
+
+// GET /api/attendance?role=admin&employeeId=...&includePhotos=false
+router.get('/', (req: Request, res: Response) => {
+  try {
+    sweepUnclosedAttendance();
+    const isAdmin = String(req.query.role || '').toLowerCase() === 'admin' || req.user?.role === 'admin';
+    const includePhotos = req.query.includePhotos === 'true';
+    // Resolve the target employee: explicit query param takes precedence, then JWT payload
+    const requestedEmpId = String(req.query.employeeId || '').trim();
+    const jwtEmpId = req.user?.employeeId || req.user?.id || '';
+    // Admin with no filter → all records (excluding orphaned null-employee seed rows)
+    // Employee / role-scoped → strictly their own records only (no IS NULL fallback)
+    let records: any[];
+    if (isAdmin && !requestedEmpId) {
+      // Admin overview: return all real records (skip orphaned seed rows with no employee)
+      records = db
+        .prepare('SELECT * FROM attendance_records WHERE employeeId IS NOT NULL ORDER BY date DESC, checkIn DESC')
+        .all();
+    } else {
+      const targetId = requestedEmpId || jwtEmpId;
+      if (targetId) {
+        // Strict match — never include orphaned (null employeeId) seed records
+        records = db
+          .prepare('SELECT * FROM attendance_records WHERE employeeId = ? ORDER BY date DESC, checkIn DESC')
+          .all(targetId);
+      } else {
+        records = [];
+      }
+    }
+    return res.status(200).json(records.map((r) => forViewer(r, isAdmin, requestedEmpId || jwtEmpId, includePhotos)));
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// GET /api/attendance/:id/photo — on-demand photo fetch for zoom modal / verification audit
+router.get('/:id/photo', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const record = db.prepare('SELECT id, checkInPhoto, checkOutPhoto FROM attendance_records WHERE id = ?').get(id) as any;
+    if (!record) {
+      return res.status(404).json({ error: 'Attendance record not found' });
+    }
+    return res.status(200).json({
+      id: record.id,
+      checkInPhoto: record.checkInPhoto || null,
+      checkOutPhoto: record.checkOutPhoto || null,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// GET /api/attendance/today — check current shift status for employee
+router.get('/today', (req: Request, res: Response) => {
+  try {
+    sweepUnclosedAttendance();
+    const userEmpId = req.user?.employeeId || req.user?.id;
+    const userEmpCode = req.user?.empCode;
+    const targetEmpId = String(req.query.employeeId || '').trim() || userEmpId;
+    const todayStr = getTodayDateIST();
+
+    const record = targetEmpId
+      ? db.prepare(`
+          SELECT * FROM attendance_records 
+          WHERE date = ? AND (
+            employeeId = ? OR
+            employeeId = ? OR
+            id = ? OR
+            (employeeName IS NOT NULL AND employeeName = ?)
+          )
+          ORDER BY createdAt DESC LIMIT 1
+        `).get(todayStr, targetEmpId, userEmpCode || targetEmpId, `att-${todayStr}-${targetEmpId}`, req.user?.name || '')
+      : null;
+
+    if (!record) {
+      return res.status(200).json({
+        hasRecord: false,
+        status: 'NOT_CHECKED_IN',
+        faceIdStatus: 'NOT_CHECKED_IN',
+        checkIn: null,
+        checkOut: null,
+        date: todayStr
+      });
+    }
+
+    const r = record as any;
+    const isDisputed = Boolean(r.disputedByAdmin);
+    const isCheckedOut = !isDisputed && !!r.checkOut;
+    return res.status(200).json({
+      hasRecord: true,
+      checkedIn: !isDisputed && !isCheckedOut && Boolean(r.checkIn),
+      id: r.id,
+      date: r.date,
+      status: isDisputed ? 'ABSENT' : (isCheckedOut ? 'SHIFT_COMPLETED' : 'ON_DUTY'),
+      shiftStatus: isDisputed ? 'ABSENT' : (isCheckedOut ? 'SHIFT_COMPLETED' : 'ON_DUTY'),
+      faceIdStatus: isDisputed ? 'NOT_CHECKED_IN' : (isCheckedOut ? 'ON_BREAK' : 'VERIFIED_PRESENT'),
+      checkIn: isDisputed ? null : r.checkIn,
+      inTime: isDisputed ? null : r.checkIn,
+      checkOut: isDisputed ? null : r.checkOut,
+      outTime: isDisputed ? null : r.checkOut,
+      workHours: isDisputed ? null : r.workHours,
+      method: r.method,
+      locationStatus: r.locationStatus,
+      checkInPhoto: r.checkInPhoto,
+      checkInLat: r.checkInLat,
+      checkInLng: r.checkInLng,
+      checkInDistanceM: r.checkInDistanceM,
+      punchOutStatus: r.punchOutStatus || 'NORMAL',
+      isAutoClosed: Boolean(r.isAutoClosed),
+      disputedByAdmin: isDisputed,
+      disputeReason: isDisputed ? (r.disputeReason || 'Suspicious punch-in photo flagged by admin.') : null
+    });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// GET /api/attendance/geocode/reverse?lat=...&lon=...
+router.get('/geocode/reverse', async (req: Request, res: Response) => {
+  try {
+    const lat = req.query.lat;
+    const lon = req.query.lon || req.query.lng;
+    if (!lat || !lon) {
+      return res.status(400).json({ error: 'lat and lon are required' });
+    }
+
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lon))}&format=json`,
+      {
+        headers: {
+          'User-Agent': 'TradeNexus-Attendance/1.0 (admin@tradenexus.in)'
+        }
+      }
+    );
+
+    if (response.ok) {
+      const data = (await response.json()) as any;
+      return res.status(200).json({
+        displayName: data.display_name || '',
+        address: data.address || {},
+        raw: data
+      });
+    }
+
+    // Fallback to BigDataCloud
+    const bdcRes = await fetch(
+      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`
+    );
+    if (bdcRes.ok) {
+      const bdc = (await bdcRes.json()) as any;
+      const displayName = [bdc.locality, bdc.city, bdc.principalSubdivision, bdc.postcode, bdc.countryName].filter(Boolean).join(', ');
+      return res.status(200).json({ displayName, raw: bdc });
+    }
+    return res.status(502).json({ error: 'Reverse geocode service unavailable' });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// GET /api/attendance/geocode/search?q=...
+router.get('/geocode/search', async (req: Request, res: Response) => {
+  try {
+    const q = req.query.q;
+    if (!q) return res.status(400).json({ error: 'Query q is required' });
+
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(String(q))}&format=json&limit=5`,
+      {
+        headers: {
+          'User-Agent': 'TradeNexus-Attendance/1.0 (admin@tradenexus.in)'
+        }
+      }
+    );
+
+    if (!response.ok) {
+      return res.status(response.status).json({ error: 'Search failed' });
+    }
+
+    const data = await response.json();
+    return res.status(200).json(data);
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// GET /api/attendance/office — where the office is
+router.get('/office', (_req: Request, res: Response) => {
+  try {
+    const office = db.prepare('SELECT * FROM office_settings LIMIT 1').get();
+    return res.status(200).json(office);
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// PUT /api/attendance/office — set the office address and how far counts as "at office"
+router.put('/office', (req: Request, res: Response) => {
+  try {
+    const { label, latitude, longitude, radiusMeters } = req.body;
+    const current = db.prepare('SELECT * FROM office_settings LIMIT 1').get() as any;
+    db.prepare(
+      `UPDATE office_settings
+         SET label = ?, latitude = ?, longitude = ?, radiusMeters = ?, updatedAt = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(
+      label ?? current.label,
+      latitude ?? current.latitude,
+      longitude ?? current.longitude,
+      radiusMeters ?? current.radiusMeters,
+      current.id
+    );
+    return res.status(200).json(db.prepare('SELECT * FROM office_settings LIMIT 1').get());
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// POST /api/attendance — check in (optionally with photo and location)
+router.post('/', async (req: Request, res: Response) => {
+  try {
+    const {
+      id, date, dayNumber, status, checkIn, checkOut, workHours, method,
+      employeeId, employeeName, checkInPhoto, latitude, longitude, inTime, outTime
+    } = req.body;
+
+    const resolvedCheckInPhoto = await processAttendancePhoto(checkInPhoto, employeeId || req.user?.empCode || 'self', 'in');
+    const resolvedCheckIn = checkIn || inTime || getCurrentTimeIST();
+    const resolvedCheckOut = checkOut || outTime || null;
+
+    const recDate = date || getTodayDateIST();
+    const recDay = dayNumber || new Date(recDate).getDate();
+
+    // Match any existing record for this employee today by employeeId, empCode, name or provided id
+    const existing = db.prepare(`
+      SELECT id FROM attendance_records
+      WHERE date = ? AND (
+        id = ? OR
+        employeeId = ? OR
+        (employeeId IS NOT NULL AND employeeId = ?) OR
+        (employeeName IS NOT NULL AND employeeName = ?)
+      )
+      ORDER BY createdAt DESC LIMIT 1
+    `).get(recDate, id || '', employeeId || '', req.user?.empCode || '', employeeName || '') as { id: string } | undefined;
+
+    const recId = existing?.id || id || `att-${recDate}-${employeeId || 'self'}`;
+
+    // Judge the location against the office perimeter
+    let distance: number | null = null;
+    let locationStatus = 'NOT_SHARED';
+
+    const office = db.prepare('SELECT * FROM office_settings LIMIT 1').get() as OfficeRow | undefined;
+    const isOfficeConfigured = office?.latitude != null && office?.longitude != null;
+
+    if (isOfficeConfigured) {
+      if (latitude == null || longitude == null) {
+        return res.status(400).json({
+          error: 'Location permission is required to verify you are at the office before punching in.',
+          code: 'LOCATION_REQUIRED'
+        });
+      }
+      distance = metresBetween(latitude, longitude, office.latitude, office.longitude);
+      if (distance > office.radiusMeters) {
+        const distStr = distance >= 1000 ? `${(distance / 1000).toFixed(1)} km` : `${distance}m`;
+        return res.status(403).json({
+          error: `You are outside the office perimeter (${distStr} away). Punch-in is restricted to within ${office.radiusMeters}m of the office.`,
+          distance,
+          radiusMeters: office.radiusMeters,
+          code: 'GEOFENCE_OUT_OF_BOUNDS'
+        });
+      }
+      locationStatus = 'AT_OFFICE';
+    } else if (latitude != null && longitude != null) {
+      locationStatus = 'OFFICE_NOT_SET';
+    }
+
+    // Evaluate shift cutoff: check if punch-in is after punchInWindowEnd or shiftStartTime + gracePeriodMinutes
+    let effectiveStatus = status;
+    if (!effectiveStatus || effectiveStatus === 'PRESENT') {
+      try {
+        const cal = db.prepare('SELECT shiftStartTime, gracePeriodMinutes, enableLateMarking, punchInWindowEnd FROM calendar_settings WHERE id = ?').get('settings-default') as any;
+        const isLateEnabled = cal?.enableLateMarking !== 0 && cal?.enableLateMarking !== false;
+        
+        if (!isLateEnabled) {
+          // Admin has disabled Late tags: all valid punch-ins receive PRESENT
+          effectiveStatus = 'PRESENT';
+        } else if (cal) {
+          // Late marking is enabled: check if punch-in exceeds configured cutoff
+          let cutoffMin: number | null = null;
+          if (cal.punchInWindowEnd) {
+            cutoffMin = minutesOfDay(cal.punchInWindowEnd);
+          }
+          if (cutoffMin === null && cal.shiftStartTime) {
+            const shiftStartMin = minutesOfDay(cal.shiftStartTime);
+            if (shiftStartMin !== null) {
+              cutoffMin = shiftStartMin + (Number(cal.gracePeriodMinutes) || 0);
+            }
+          }
+
+          const checkInMin = minutesOfDay(resolvedCheckIn);
+          if (cutoffMin !== null && checkInMin !== null) {
+            effectiveStatus = checkInMin > cutoffMin ? 'LATE' : 'PRESENT';
+          } else {
+            effectiveStatus = 'PRESENT';
+          }
+        }
+      } catch (e) {
+        console.warn('Shift cutoff evaluation failed:', e);
+      }
+    }
+    if (!effectiveStatus) effectiveStatus = 'PRESENT';
+
+    db.prepare(`
+      INSERT INTO attendance_records
+        (id, date, dayNumber, status, checkIn, checkOut, workHours, method,
+         employeeId, employeeName, checkInPhoto, checkInLat, checkInLng,
+         checkInDistanceM, locationStatus, disputedByAdmin, disputeReason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+      ON CONFLICT(id) DO UPDATE SET
+        status = excluded.status,
+        checkIn = excluded.checkIn,
+        checkOut = excluded.checkOut,
+        workHours = coalesce(excluded.workHours, 'In Progress'),
+        method = coalesce(excluded.method, attendance_records.method),
+        employeeName = coalesce(excluded.employeeName, attendance_records.employeeName),
+        checkInPhoto = excluded.checkInPhoto,
+        checkInLat = coalesce(excluded.checkInLat, attendance_records.checkInLat),
+        checkInLng = coalesce(excluded.checkInLng, attendance_records.checkInLng),
+        checkInDistanceM = coalesce(excluded.checkInDistanceM, attendance_records.checkInDistanceM),
+        locationStatus = coalesce(excluded.locationStatus, attendance_records.locationStatus),
+        disputedByAdmin = 0,
+        disputeReason = NULL
+    `).run(
+      recId, recDate, recDay, effectiveStatus, resolvedCheckIn, resolvedCheckOut,
+      workHours || 'In Progress', method || 'Face ID Biometric',
+      employeeId || null, employeeName || null, resolvedCheckInPhoto || null,
+      latitude ?? null, longitude ?? null, distance, locationStatus
+    );
+
+    // Keep the roster in step so Admin's register shows today's status
+    if (employeeId) {
+      db.prepare(
+        `UPDATE team_members SET attendanceStatus = ?, checkInTime = ?, checkInMethod = ? WHERE id = ? OR empCode = ?`
+      ).run(effectiveStatus, resolvedCheckIn, method || 'Face ID Biometric', employeeId, employeeId);
+      try {
+        db.prepare(
+          `UPDATE employee_profiles SET faceIdStatus = 'VERIFIED_PRESENT', checkInTime = ? WHERE id = ? OR empCode = ?`
+        ).run(resolvedCheckIn, employeeId, employeeId);
+      } catch {}
+    }
+
+    const record = db.prepare('SELECT * FROM attendance_records WHERE id = ?').get(recId) as any;
+    emitSocketEvent('attendance:punched', {
+      id: record?.id,
+      employeeId: record?.employeeId,
+      employeeName: record?.employeeName,
+      status: record?.status,
+      date: record?.date,
+      checkIn: record?.checkIn,
+      checkOut: record?.checkOut,
+      type: 'IN',
+    });
+    return res.status(201).json({
+      ...record,
+      inTime: record.checkIn,
+      outTime: record.checkOut
+    });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// PUT /api/attendance/:id — check out, or correct a record
+router.put('/:id', async (req: Request, res: Response) => {
+  try {
+    const today = getTodayDateIST();
+    const reqUser = (req as any).user;
+    const empParam = req.body.employeeId || reqUser?.employeeId || reqUser?.id || '';
+    const empCodeParam = req.body.empCode || reqUser?.empCode || '';
+    const empNameParam = (req.body.employeeName || reqUser?.name || '').trim();
+    const targetDate = req.body.date || today;
+
+    let existing = db.prepare('SELECT * FROM attendance_records WHERE id = ?').get(req.params.id) as any;
+    
+    // Look up employee row from team_members if available to resolve all aliases
+    let empRow: any = null;
+    if (empParam || empCodeParam || empNameParam) {
+      empRow = db.prepare(`
+        SELECT id, empCode, name FROM team_members 
+        WHERE id = ? OR empCode = ? OR empCode = ? OR (? != '' AND LOWER(TRIM(name)) = LOWER(TRIM(?)))
+        LIMIT 1
+      `).get(empParam, empParam, empCodeParam, empNameParam, empNameParam) as any;
+    }
+
+    // Fallback: match by employeeId / empCode / employeeName and date if direct ID lookup fails
+    if (!existing) {
+      const candidateIds = Array.from(new Set([req.params.id, empParam, empCodeParam, empRow?.id, empRow?.empCode].filter(Boolean)));
+      const candidateNames = Array.from(new Set([empNameParam, empRow?.name].filter(Boolean)));
+
+      if (candidateIds.length > 0 || candidateNames.length > 0) {
+        const idPlaceholders = candidateIds.map(() => '?').join(',');
+        const nameConditions = candidateNames.map(() => 'LOWER(TRIM(employeeName)) = LOWER(TRIM(?))').join(' OR ');
+
+        const conditions: string[] = [];
+        const params: any[] = [targetDate];
+
+        if (candidateIds.length > 0) {
+          conditions.push(`id IN (${idPlaceholders}) OR employeeId IN (${idPlaceholders})`);
+          params.push(...candidateIds, ...candidateIds);
+        }
+        if (candidateNames.length > 0) {
+          conditions.push(nameConditions);
+          params.push(...candidateNames);
+        }
+
+        const query = `
+          SELECT * FROM attendance_records 
+          WHERE date = ? AND (${conditions.join(' OR ')})
+          ORDER BY createdAt DESC LIMIT 1
+        `;
+        existing = db.prepare(query).get(...params) as any;
+      }
+    }
+
+    const { checkOutPhoto, latitude, longitude } = req.body;
+    const resolvedEmpId = empRow?.empCode || empRow?.id || empCodeParam || empParam || 'self';
+    const resolvedCheckOutPhoto = await processAttendancePhoto(checkOutPhoto, resolvedEmpId, 'out');
+
+    // If still not found and this is a check-out request, auto-create the record so punch-out never fails!
+    if (!existing) {
+      const finalId = req.params.id && req.params.id !== 'undefined' && req.params.id !== 'null'
+        ? req.params.id
+        : `att-${targetDate}-${empRow?.empCode || empCodeParam || empParam || 'self'}`;
+      const timeStr = req.body.checkOut || getCurrentTimeIST();
+      const resolvedEmpName = empRow?.name || empNameParam || 'Employee';
+
+      db.prepare(`
+        INSERT INTO attendance_records (
+          id, date, dayNumber, status, checkIn, checkOut, workHours, method,
+          employeeId, employeeName, checkOutPhoto, checkOutLat, checkOutLng, checkOutLocationStatus
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        finalId,
+        targetDate,
+        new Date(targetDate).getDate() || 1,
+        'PRESENT',
+        req.body.checkIn || timeStr,
+        timeStr,
+        '8h 00m',
+        req.body.method || 'Face ID Biometric',
+        resolvedEmpId,
+        resolvedEmpName,
+        resolvedCheckOutPhoto ?? null,
+        req.body.latitude ?? null,
+        req.body.longitude ?? null,
+        'AT_OFFICE'
+      );
+      existing = db.prepare('SELECT * FROM attendance_records WHERE id = ?').get(finalId) as any;
+    }
+
+    if (!existing) return res.status(404).json({ error: 'Attendance record not found' });
+    const targetRecordId = existing.id;
+    const merged = { ...existing, ...req.body };
+
+    // Judge the check-out position the same way as the check-in
+    let outDistance: number | null = existing.checkOutDistanceM ?? null;
+    let outStatus: string | null = existing.checkOutLocationStatus ?? null;
+
+    if (latitude != null && longitude != null) {
+      const office = db.prepare('SELECT * FROM office_settings LIMIT 1').get() as OfficeRow | undefined;
+      if (office?.latitude != null && office?.longitude != null) {
+        outDistance = metresBetween(latitude, longitude, office.latitude, office.longitude);
+        outStatus = outDistance <= office.radiusMeters ? 'AT_OFFICE' : 'AWAY';
+      } else {
+        outStatus = 'OFFICE_NOT_SET';
+      }
+    } else if (merged.checkOut && !outStatus) {
+      outStatus = 'NOT_SHARED';
+    }
+
+    // Hours worked, once both ends of the day are known
+    let workHours = merged.workHours;
+    const start = minutesOfDay(merged.checkIn);
+    const end = minutesOfDay(merged.checkOut);
+    if (start != null && end != null && end >= start) {
+      const mins = end - start;
+      workHours = `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`;
+    }
+
+    db.prepare(
+      `UPDATE attendance_records
+         SET status = ?, checkIn = ?, checkOut = ?, workHours = ?, method = ?,
+             checkOutPhoto = coalesce(?, checkOutPhoto),
+             checkOutLat = coalesce(?, checkOutLat),
+             checkOutLng = coalesce(?, checkOutLng),
+             checkOutDistanceM = ?, checkOutLocationStatus = ?,
+             disputedByAdmin = coalesce(?, disputedByAdmin),
+             disputeReason = coalesce(?, disputeReason)
+       WHERE id = ?`
+    ).run(
+      merged.status, merged.checkIn, merged.checkOut, workHours, merged.method,
+      resolvedCheckOutPhoto ?? null, latitude ?? null, longitude ?? null,
+      outDistance, outStatus,
+      merged.disputedByAdmin !== undefined ? (merged.disputedByAdmin ? 1 : 0) : null,
+      merged.disputeReason !== undefined ? merged.disputeReason : null,
+      targetRecordId
+    );
+
+    // Synchronize team_members and employee_profiles table
+    const targetEmpId = merged.employeeId || empRow?.id || empRow?.empCode || empParam;
+    const targetEmpCode = empRow?.empCode || empCodeParam || targetEmpId;
+    const targetEmpName = merged.employeeName || empRow?.name || empNameParam;
+
+    if (targetEmpId || targetEmpCode || targetEmpName) {
+      try {
+        if (merged.disputedByAdmin) {
+          db.prepare(`
+            UPDATE employee_profiles 
+            SET faceIdStatus = 'NOT_CHECKED_IN', checkInTime = '' 
+            WHERE id = ? OR empCode = ? OR (name IS NOT NULL AND LOWER(TRIM(name)) = LOWER(TRIM(?)))
+          `).run(targetEmpId, targetEmpCode, targetEmpName);
+        } else if (merged.checkOut) {
+          db.prepare(`
+            UPDATE employee_profiles 
+            SET faceIdStatus = 'ON_BREAK', checkOutTime = ? 
+            WHERE id = ? OR empCode = ? OR (name IS NOT NULL AND LOWER(TRIM(name)) = LOWER(TRIM(?)))
+          `).run(merged.checkOut, targetEmpId, targetEmpCode, targetEmpName);
+
+          db.prepare(`
+            UPDATE team_members 
+            SET attendanceStatus = 'PRESENT' 
+            WHERE id = ? OR empCode = ? OR (name IS NOT NULL AND LOWER(TRIM(name)) = LOWER(TRIM(?)))
+          `).run(targetEmpId, targetEmpCode, targetEmpName);
+        } else if (merged.status === 'PRESENT' || merged.status === 'LATE') {
+          db.prepare(`
+            UPDATE employee_profiles 
+            SET faceIdStatus = 'VERIFIED_PRESENT', checkInTime = coalesce(?, checkInTime) 
+            WHERE id = ? OR empCode = ? OR (name IS NOT NULL AND LOWER(TRIM(name)) = LOWER(TRIM(?)))
+          `).run(merged.checkIn || null, targetEmpId, targetEmpCode, targetEmpName);
+
+          db.prepare(`
+            UPDATE team_members 
+            SET attendanceStatus = ? 
+            WHERE id = ? OR empCode = ? OR (name IS NOT NULL AND LOWER(TRIM(name)) = LOWER(TRIM(?)))
+          `).run(merged.status, targetEmpId, targetEmpCode, targetEmpName);
+        }
+      } catch (syncErr) {
+        console.warn('[Attendance Route] Profile/team member sync warning:', syncErr);
+      }
+    }
+
+    const updatedRec = db.prepare('SELECT * FROM attendance_records WHERE id = ?').get(targetRecordId) as any;
+    const isDisputed = req.body.disputedByAdmin !== undefined;
+    const isCheckOut = !isDisputed && Boolean(req.body.checkOut || (merged.checkOut && !existing?.checkOut));
+    emitSocketEvent('attendance:punched', {
+      id: updatedRec?.id,
+      employeeId: updatedRec?.employeeId,
+      employeeName: updatedRec?.employeeName,
+      status: updatedRec?.status,
+      date: updatedRec?.date,
+      checkIn: updatedRec?.checkIn,
+      checkOut: updatedRec?.checkOut,
+      type: isDisputed ? 'ADMIN_UPDATE' : (isCheckOut ? 'OUT' : 'IN'),
+    });
+    return res.status(200).json(updatedRec);
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// POST /api/attendance/purge-photos (Super Admin Exclusive: Clears photo storage while preserving 100% of attendance logs)
+router.post('/purge-photos', (req: Request, res: Response) => {
+  try {
+    const reqUser = (req as any).user;
+    if (!reqUser || reqUser.role !== 'admin') {
+      return res.status(403).json({ error: 'Access Denied: Only Super Admin can manage photo storage.' });
+    }
+
+    const { cutoffDate, month, scope, startDate, endDate, all } = req.body;
+    let changes = 0;
+
+    if (cutoffDate) {
+      const info = db.prepare(`
+        UPDATE attendance_records
+        SET checkInPhoto = NULL,
+            checkOutPhoto = NULL,
+            photoAudited = 1
+        WHERE date < ? AND (checkInPhoto IS NOT NULL OR checkOutPhoto IS NOT NULL)
+      `).run(cutoffDate);
+      changes = info.changes;
+    } else if (month && /^\d{4}-\d{2}$/.test(month)) {
+      const info = db.prepare(`
+        UPDATE attendance_records
+        SET checkInPhoto = NULL,
+            checkOutPhoto = NULL,
+            photoAudited = 1
+        WHERE (date LIKE ? OR strftime('%Y-%m', date) = ?)
+          AND (checkInPhoto IS NOT NULL OR checkOutPhoto IS NOT NULL)
+      `).run(`${month}%`, month);
+      changes = info.changes;
+    } else if (startDate && endDate) {
+      const info = db.prepare(`
+        UPDATE attendance_records
+        SET checkInPhoto = NULL,
+            checkOutPhoto = NULL,
+            photoAudited = 1
+        WHERE date >= ? AND date <= ?
+          AND (checkInPhoto IS NOT NULL OR checkOutPhoto IS NOT NULL)
+      `).run(startDate, endDate);
+      changes = info.changes;
+    } else if (scope === 'ALL' || all === true || all === 'true') {
+      const info = db.prepare(`
+        UPDATE attendance_records
+        SET checkInPhoto = NULL,
+            checkOutPhoto = NULL,
+            photoAudited = 1
+        WHERE checkInPhoto IS NOT NULL OR checkOutPhoto IS NOT NULL
+      `).run();
+      changes = info.changes;
+    } else {
+      return res.status(400).json({ error: 'Please specify either cutoffDate, month, date range, or scope.' });
+    }
+
+    try {
+      db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: true,
+      purgedCount: changes,
+      purgedRecordsCount: changes,
+      message: `Successfully purged photos for ${changes} records. All attendance logs, timings, and leave balances are permanently retained.`
+    });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// DELETE /api/attendance — clear attendance records with optional date filters
+router.delete('/', (req: Request, res: Response) => {
+  try {
+    const { date, startDate, endDate, month, year, all } = req.query;
+
+    if (all === 'true') {
+      const info = db.prepare('DELETE FROM attendance_records').run();
+      return res.status(200).json({ success: true, count: info.changes, message: `Cleared all ${info.changes} attendance records` });
+    }
+
+    if (date) {
+      const info = db.prepare('DELETE FROM attendance_records WHERE date = ?').run(String(date));
+      return res.status(200).json({ success: true, count: info.changes, message: `Cleared ${info.changes} records for date ${date}` });
+    }
+
+    if (startDate && endDate) {
+      const info = db.prepare('DELETE FROM attendance_records WHERE date >= ? AND date <= ?').run(String(startDate), String(endDate));
+      return res.status(200).json({ success: true, count: info.changes, message: `Cleared ${info.changes} records from ${startDate} to ${endDate}` });
+    }
+
+    if (month && year) {
+      const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
+      const info = db.prepare('DELETE FROM attendance_records WHERE date LIKE ?').run(`${monthPrefix}%`);
+      return res.status(200).json({ success: true, count: info.changes, message: `Cleared ${info.changes} records for ${monthPrefix}` });
+    }
+
+    // Default if no param: delete for today
+    const today = getTodayDateIST();
+    const info = db.prepare('DELETE FROM attendance_records WHERE date = ?').run(today);
+    return res.status(200).json({ success: true, count: info.changes, message: `Cleared ${info.changes} records for ${today}` });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// POST /api/attendance/re-evaluate-today — admin action to re-evaluate today's active punches against current timing rules
+router.post('/re-evaluate-today', (req: Request, res: Response) => {
+  try {
+    const cal = db.prepare('SELECT * FROM calendar_settings WHERE id = ?').get('settings-default') as any;
+    const count = recalculateTodayAttendance(cal || {});
+    return res.status(200).json({ success: true, count, message: `Re-evaluated ${count} attendance records for today` });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// DELETE /api/attendance/:id — delete a specific attendance record
+router.delete('/:id', (req: Request, res: Response) => {
+  try {
+    const info = db.prepare('DELETE FROM attendance_records WHERE id = ?').run(req.params.id);
+    return res.status(200).json({ success: true, count: info.changes });
+  } catch (error) {
+    return res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+export default router;
