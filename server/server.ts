@@ -144,11 +144,11 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 
 // Start Server
 if (process.env.NODE_ENV !== 'test') {
-  const server = httpServer.listen(PORT, () => {
+  const server = httpServer.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`\n==================================================`);
-    console.log(`🚀 Trade Nexus SQLite Server running on http://localhost:${PORT}`);
+    console.log(`🚀 Mona Sri Server running on http://0.0.0.0:${PORT}`);
     console.log(`⚡ Socket.IO real-time gateway mounted on path /api/socket.io`);
-    console.log(`📊 Connected to SQLite local database.`);
+    console.log(`📊 Connected to Database.`);
     console.log(`==================================================\n`);
 
     // Dynamic Attendance Punch-In Automated Reminder Daemon (checks live every 60s)

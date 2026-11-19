@@ -38,9 +38,12 @@ export function initializeDatabaseSchema() {
     -- 3. Call Logs
     CREATE TABLE IF NOT EXISTS call_logs (
       id TEXT PRIMARY KEY,
+      employeeId TEXT,
+      employeeName TEXT,
       clientName TEXT NOT NULL,
       companyName TEXT NOT NULL,
       phoneNumber TEXT NOT NULL,
+      date TEXT,
       timestamp TEXT NOT NULL,
       durationSec INTEGER NOT NULL DEFAULT 0,
       outcome TEXT NOT NULL,
@@ -68,6 +71,8 @@ export function initializeDatabaseSchema() {
     -- 5. Attendance Records
     CREATE TABLE IF NOT EXISTS attendance_records (
       id TEXT PRIMARY KEY,
+      employeeId TEXT,
+      employeeName TEXT,
       date TEXT NOT NULL,
       dayNumber INTEGER NOT NULL,
       status TEXT NOT NULL,
@@ -75,6 +80,19 @@ export function initializeDatabaseSchema() {
       checkOut TEXT,
       workHours TEXT,
       method TEXT,
+      checkInPhoto TEXT,
+      checkInLat REAL,
+      checkInLng REAL,
+      checkInDistanceM REAL,
+      locationStatus TEXT,
+      photoAudited INTEGER DEFAULT 0,
+      checkOutPhoto TEXT,
+      checkOutLat REAL,
+      checkOutLng REAL,
+      checkOutDistanceM REAL,
+      checkOutLocationStatus TEXT,
+      disputedByAdmin INTEGER DEFAULT 0,
+      disputeReason TEXT,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -362,11 +380,8 @@ export function initializeDatabaseSchema() {
 
     -- Indices for optimal lookup speeds
     CREATE INDEX IF NOT EXISTS idx_call_logs_timestamp ON call_logs(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_call_logs_emp_created ON call_logs(employeeId, createdAt DESC);
-    CREATE INDEX IF NOT EXISTS idx_call_logs_date ON call_logs(date);
     CREATE INDEX IF NOT EXISTS idx_client_leads_status ON client_leads(status);
     CREATE INDEX IF NOT EXISTS idx_attendance_records_date ON attendance_records(date);
-    CREATE INDEX IF NOT EXISTS idx_attendance_records_emp_date ON attendance_records(employeeId, date);
     CREATE INDEX IF NOT EXISTS idx_assigned_leads_emp ON assigned_leads(assignedToEmployeeId);
     CREATE INDEX IF NOT EXISTS idx_assigned_leads_emp_created ON assigned_leads(assignedToEmployeeId, createdAt DESC);
     CREATE INDEX IF NOT EXISTS idx_assigned_leads_status ON assigned_leads(status);
@@ -511,6 +526,16 @@ function runMigrations() {
   addColumnIfMissing('call_logs', 'employeeId', 'TEXT');
   addColumnIfMissing('call_logs', 'employeeName', 'TEXT');
   addColumnIfMissing('call_logs', 'date', 'TEXT');
+
+  try {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_call_logs_emp_created ON call_logs(employeeId, createdAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_call_logs_date ON call_logs(date);
+      CREATE INDEX IF NOT EXISTS idx_attendance_records_emp_date ON attendance_records(employeeId, date);
+    `);
+  } catch (idxErr: any) {
+    console.warn('[Schema Index Warning]:', idxErr.message);
+  }
 
   // Which of the four portals a person may enter. `role` is their job title
   // (free text); `portal` is what the system acts on.
